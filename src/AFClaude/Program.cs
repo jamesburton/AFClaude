@@ -59,32 +59,50 @@ static async Task RunHttpAsync(string[] args)
         OpenAiChatRequest request,
         ChatClient chatClient,
         DeploymentInfo info,
+        ILogger<Program> logger,
         CancellationToken cancellationToken) =>
     {
-        var messages = request.Messages.Select(ToChatMessage).ToList();
-
-        var completion = await chatClient.CompleteChatAsync(messages, cancellationToken: cancellationToken);
-
-        var text = completion.Value.Content.Count > 0
-            ? completion.Value.Content[0].Text
-            : string.Empty;
-
-        return Results.Json(new
+        try
         {
-            id = $"chatcmpl-{Guid.NewGuid():N}",
-            @object = "chat.completion",
-            created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-            model = request.Model ?? info.Deployment,
-            choices = new[]
+            var messages = request.Messages.Select(ToChatMessage).ToList();
+
+            var completion = await chatClient.CompleteChatAsync(messages, cancellationToken: cancellationToken);
+
+            var text = completion.Value.Content.Count > 0
+                ? completion.Value.Content[0].Text
+                : string.Empty;
+
+            return Results.Json(new
             {
-                new
+                id = $"chatcmpl-{Guid.NewGuid():N}",
+                @object = "chat.completion",
+                created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                model = request.Model ?? info.Deployment,
+                choices = new[]
                 {
-                    index = 0,
-                    message = new { role = "assistant", content = text },
-                    finish_reason = "stop"
+                    new
+                    {
+                        index = 0,
+                        message = new { role = "assistant", content = text },
+                        finish_reason = "stop"
+                    }
                 }
-            }
-        });
+            });
+        }
+        catch (Exception ex) when (FoundryErrors.IsAuthFailure(ex))
+        {
+            logger.LogError(ex, "Chat completion auth failure");
+            return Results.Json(
+                new { error = new { message = FoundryErrors.Describe(ex), type = "authentication_error", code = (string?)null } },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Chat completion failed");
+            return Results.Json(
+                new { error = new { message = FoundryErrors.Describe(ex), type = "server_error", code = (string?)null } },
+                statusCode: StatusCodes.Status500InternalServerError);
+        }
     });
 
     await app.RunAsync();

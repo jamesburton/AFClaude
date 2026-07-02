@@ -2,8 +2,8 @@
 
 Origin: this plan captures and structures a design chat about wrapping an Azure AI
 Foundry model for local use from Claude via Microsoft Agent Framework, .NET 10, `dnx`,
-and `az`-based auth. Phases 1–4 are implemented and verified as described below (see
-each phase for exactly what "verified" means); Phases 5–6 are still ahead.
+and `az`-based auth. Phases 1–5 are implemented and verified as described below (see
+each phase for exactly what "verified" means); Phase 6 is still ahead.
 
 ## Open decisions
 
@@ -162,20 +162,36 @@ the actual finding; the rest still need a decision before the phase that touches
 - Separately, `dnx`-based zero-install launch (`dnx AFClaude -y`) is still to be
   smoke-tested once a real version is published — see Phase 6.
 
-## Phase 5 — Auth hardening
+## Phase 5 — Auth hardening — DONE
 
-- Partially observed already: a missing/unauthenticated `az` surfaces as
-  `Azure.Identity.CredentialUnavailableException: Azure CLI not installed` — already
-  a fairly clear message, but in HTTP mode it currently reaches the client as a raw
-  500 with a full internal stack trace (no exception handling middleware yet). Add a
-  problem-details/error-shape response in HTTP mode and an equivalent clean MCP tool
-  error in stdio mode instead of letting either leak a stack trace.
-- Confirm behavior when `az login` has expired specifically (not just "never run")
-- Decide whether to fall back to `DefaultAzureCredential` (managed identity, VS/VS
-  Code credential, etc.) for non-interactive/CI use, or stay `AzureCliCredential`-only
-  for simplicity
-- Exit criteria: documented, reproducible error message for the "forgot to `az login`"
-  case, in both modes, without a leaked stack trace
+- `FoundryErrors.cs`: classifies `Azure.Identity.CredentialUnavailableException`
+  ("az not installed / never logged in") and `AuthenticationFailedException`
+  ("`az login` session expired or invalid") into short user-facing messages, with a
+  generic fallback for everything else. No stack traces in either message.
+- HTTP mode: `/v1/chat/completions` wraps its body in try/catch — auth failures
+  return `401` with an OpenAI-style `{error: {message, type: "authentication_error",
+  code}}` body; anything else returns `500` with `type: "server_error"`. Full
+  exception detail goes to `ILogger`, never to the client.
+- MCP mode: `FoundryTools.AskFoundryAsync` catches all exceptions, logs the full
+  exception via injected `ILogger<FoundryTools>` (stderr, per the stdio logging
+  setup from Phase 3), and returns `FoundryErrors.Describe(ex)` as the tool's normal
+  string result — no exception propagates through the MCP protocol layer, so there's
+  no dependency on how the SDK would have serialized an unhandled exception.
+- Decision: stayed **`AzureCliCredential`-only**, no `DefaultAzureCredential`
+  fallback — matches the original ask (Entra/`az` auth specifically) and keeps the
+  error surface to two well-understood exception types instead of the wider set
+  `DefaultAzureCredential`'s credential chain can throw.
+- Exit criteria — verified against the real `AFClaude.dll` with a fake endpoint
+  (`az` not installed in this sandbox, so `CredentialUnavailableException` is what
+  actually fires — the real, not simulated, "forgot to `az login`" case): HTTP mode
+  returns `401` + the clean JSON body above (no stack trace) instead of the raw `500`
+  seen in Phase 2; MCP mode's `tools/call` for `ask_foundry` returns the same clean
+  message as the tool's `content[0].text`, confirmed over stdio via the
+  `System.Diagnostics.Process` harness from Phase 3. The "`az login` expired"
+  (`AuthenticationFailedException`) branch is implemented identically but unverified
+  live — this sandbox has no `az` at all, so only the "never logged in" path is
+  reachable here; re-check the expired-session message against a real `az` install
+  when convenient.
 
 ## Phase 6 — Polish (only once 1–5 work end to end)
 

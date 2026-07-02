@@ -69,6 +69,7 @@ Set via environment variables (or `appsettings.json` / `dotnet user-secrets` loc
 | `Foundry__Endpoint`   | `https://<resource>.cognitiveservices.azure.com/`  | Use whatever `az cognitiveservices account list` reports as `properties.endpoint`. The `.cognitiveservices.azure.com` shape is verified live against a real AIServices/Foundry resource; `.openai.azure.com` resource endpoints should work identically. |
 | `Foundry__Deployment` | `gpt-4o-mini`                                       | Deployment name, not the base model name. |
 | `Foundry__Api`        | `auto` (default)                                   | Which API surface serves the deployment. `auto` probes once and prefers the **native Anthropic passthrough** (Claude deployments on Foundry live at `{endpoint}/anthropic/v1/messages`, not the Azure-OpenAI route); `anthropic` / `openai` skip detection. The OpenAI path is retained for OpenAI-compatible deployments and, in future, other OpenAI-only hosts (e.g. Ollama) — that broader use is untested so far. |
+| `Foundry__AnthropicBeta` | `strip` (default)                               | `anthropic-beta` header policy for the passthrough. Claude Code sends opt-in feature flags assuming real Anthropic infrastructure, but Foundry **hard-rejects unknown beta values with a 400** (observed live with `advisor-tool-2026-03-01`) — so the default strips them; features degrade gracefully. `passthrough` forwards the client's flags; any other value is sent as a literal replacement list. |
 | `Foundry__CliTimeoutSeconds` | `60` (default)                              | How long to wait for the `az` CLI to produce a token. The Azure SDK default (13s) is too short for a cold `az` start on slow or loaded machines (14–24s observed) — AFClaude defaults to 60; raise it if you still see token-timeout errors. |
 | `AFClaude__TraceDir`  | *(unset)*                                          | Opt-in wire tracing for `/v1/messages`: dumps each request's raw Anthropic body, translated Azure request, Azure response, and the reply to numbered files in this directory. For diagnosing translation/model issues. **Traces contain full conversation content** — use a private directory and delete afterwards. |
 
@@ -173,9 +174,12 @@ with `stop_reason: "tool_use"`. `max_tokens`, `temperature`, `top_p`, and
 > paths are verified end-to-end against the real `claude` client
 > (`tools/local-e2e/run-e2e.ps1`), but Claude Code's prompts are tuned for Claude —
 > a non-Claude model may answer in plain text (or fabricate output) instead of
-> calling tools, which looks like "it read the file" while it never did. If tool
-> turns behave oddly, set `AFClaude__TraceDir` and check whether the model's
-> responses actually contain `tool_calls` (see TESTING.md, "Stage 6c diagnosis"). See [PLAN.md](PLAN.md) Phase 8 for what's left.
+> calling tools, which looks like "it read the file" while it never did.
+> **Confirmed live: gpt-4.1 does this even with correct message translation** — it
+> is not reliable as a Claude Code backend. If your Foundry org has a Claude
+> deployment, prefer it (the passthrough makes it behave natively). If tool turns
+> behave oddly, set `AFClaude__TraceDir` and check whether the model's responses
+> actually contain `tool_calls` (see TESTING.md, "Stage 6c diagnosis"). See [PLAN.md](PLAN.md) Phase 8 for what's left.
 
 ### Other OpenAI-compatible clients (HTTP proxy, secondary)
 

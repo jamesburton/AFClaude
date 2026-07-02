@@ -116,6 +116,20 @@ app.MapPost("/anthropic/v1/messages", async (HttpContext http) =>
         return;
     }
 
+    // Real Foundry hard-rejects anthropic-beta flags it doesn't recognise (observed
+    // live with Claude Code's advisor-tool flag) — mimic that so the E2E fails if
+    // AFClaude ever stops stripping the header by default.
+    if (http.Request.Headers.TryGetValue("anthropic-beta", out var beta))
+    {
+        http.Response.StatusCode = 400;
+        await http.Response.WriteAsJsonAsync(new
+        {
+            type = "error",
+            error = new { type = "invalid_request_error", message = $"Unexpected value(s) '{beta}' for the 'anthropic-beta' header." }
+        });
+        return;
+    }
+
     using var doc = JsonDocument.Parse(body);
     var stream = doc.RootElement.TryGetProperty("stream", out var s) && s.ValueKind == JsonValueKind.True;
     var isProbeCall = doc.RootElement.TryGetProperty("max_tokens", out var mt)

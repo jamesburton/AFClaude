@@ -68,8 +68,13 @@ internal static class FoundryClientFactory
             endpoint = new Uri(endpoint.AbsoluteUri + "/");
         }
 
+        // anthropic-beta policy for the passthrough: strip (default — Foundry 400s on
+        // beta flags it doesn't recognise), passthrough, or a literal replacement list.
+        var betaMode = configuration["Foundry:AnthropicBeta"];
+        betaMode = string.IsNullOrWhiteSpace(betaMode) ? FoundryAnthropicClient.BetaStrip : betaMode.Trim();
+
         var azureClient = new AzureOpenAIClient(endpoint, credential);
-        var anthropic = new FoundryAnthropicClient(SharedHttp, endpoint, deployment, credential);
+        var anthropic = new FoundryAnthropicClient(SharedHttp, endpoint, deployment, credential, betaMode);
         var resolver = new FoundryApiResolver(configuredApi, anthropic.ProbeAsync);
         return new FoundryClient(azureClient.GetChatClient(deployment), anthropic, resolver, deployment, credential);
     }

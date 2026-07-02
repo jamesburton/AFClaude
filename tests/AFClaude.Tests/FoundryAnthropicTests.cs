@@ -60,16 +60,45 @@ public class FoundryAnthropicTests
 
         using var response = await client.ForwardAsync(
             """{"model":"claude-alias-from-client","max_tokens":5,"messages":[]}""",
-            "messages", anthropicVersion: null, anthropicBeta: "tools-2024", CancellationToken.None);
+            "messages", anthropicVersion: null, anthropicBeta: "advisor-tool-2026-03-01", CancellationToken.None);
 
         Assert.Equal("https://resource.services.ai.azure.com/anthropic/v1/messages", handler.Request!.RequestUri!.ToString());
         Assert.Equal("Bearer bearer-abc", handler.Request.Headers.GetValues("Authorization").Single());
         Assert.Equal(FoundryAnthropicClient.DefaultAnthropicVersion, handler.Request.Headers.GetValues("anthropic-version").Single());
-        Assert.Equal("tools-2024", handler.Request.Headers.GetValues("anthropic-beta").Single());
+
+        // Default mode strips the client's beta flags — Foundry hard-rejects unknown
+        // values (observed live: 400 on Claude Code's advisor-tool flag).
+        Assert.False(handler.Request.Headers.Contains("anthropic-beta"));
 
         // Single-deployment proxy: whatever model the client asked for is rewritten.
         using var body = JsonDocument.Parse(handler.Body!);
         Assert.Equal("claude-sonnet-4-6", body.RootElement.GetProperty("model").GetString());
+    }
+
+    [Fact]
+    public async Task Forward_PassthroughBetaMode_ForwardsClientFlags()
+    {
+        var handler = new CapturingHandler(HttpStatusCode.OK, "{}");
+        var client = new FoundryAnthropicClient(
+            new HttpClient(handler), new Uri("https://r.example/"), "dep", new StaticCredential("t"),
+            FoundryAnthropicClient.BetaPassthrough);
+
+        using var _ = await client.ForwardAsync("{}", "messages", null, "advisor-tool-2026-03-01", CancellationToken.None);
+
+        Assert.Equal("advisor-tool-2026-03-01", handler.Request!.Headers.GetValues("anthropic-beta").Single());
+    }
+
+    [Fact]
+    public async Task Forward_LiteralBetaMode_ReplacesClientFlags()
+    {
+        var handler = new CapturingHandler(HttpStatusCode.OK, "{}");
+        var client = new FoundryAnthropicClient(
+            new HttpClient(handler), new Uri("https://r.example/"), "dep", new StaticCredential("t"),
+            "token-efficient-tools-2025-02-19");
+
+        using var _ = await client.ForwardAsync("{}", "messages", null, "advisor-tool-2026-03-01", CancellationToken.None);
+
+        Assert.Equal("token-efficient-tools-2025-02-19", handler.Request!.Headers.GetValues("anthropic-beta").Single());
     }
 
     [Fact]

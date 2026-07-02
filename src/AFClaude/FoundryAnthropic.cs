@@ -55,11 +55,27 @@ internal sealed class FoundryApiResolver(FoundryApi? configured, Func<Cancellati
 // Requests pass through byte-faithfully except the model field, which is rewritten to
 // the configured deployment (AFClaude is a single-deployment proxy, and Claude Code
 // sends its own model aliases for background traffic).
-internal sealed class FoundryAnthropicClient(HttpClient http, Uri endpoint, string deployment, TokenCredential credential)
+internal sealed class FoundryAnthropicClient(
+    HttpClient http,
+    Uri endpoint,
+    string deployment,
+    TokenCredential credential,
+    string betaMode = FoundryAnthropicClient.BetaStrip)
 {
     public const string DefaultAnthropicVersion = "2023-06-01";
 
+    // anthropic-beta handling. Claude Code sends opt-in feature flags (e.g.
+    // "advisor-tool-2026-03-01") when it believes it's talking to real Anthropic
+    // infrastructure; Foundry's hosted Claude endpoint hard-rejects unknown values
+    // with a 400 instead of ignoring them (observed live). Stripping is therefore the
+    // safe default — beta features degrade gracefully when the server doesn't
+    // advertise them.
+    public const string BetaStrip = "strip";
+    public const string BetaPassthrough = "passthrough";
+
     public string Deployment => deployment;
+
+    public string BetaMode => betaMode;
 
     public async Task<HttpResponseMessage> ForwardAsync(
         string rawBody,
@@ -78,9 +94,18 @@ internal sealed class FoundryAnthropicClient(HttpClient http, Uri endpoint, stri
         request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token.Token}");
         request.Headers.TryAddWithoutValidation("anthropic-version",
             string.IsNullOrEmpty(anthropicVersion) ? DefaultAnthropicVersion : anthropicVersion);
-        if (!string.IsNullOrEmpty(anthropicBeta))
+
+        // strip (default) drops the client's beta flags; passthrough forwards them;
+        // any other configured value is sent as a literal replacement list.
+        var beta = betaMode switch
         {
-            request.Headers.TryAddWithoutValidation("anthropic-beta", anthropicBeta);
+            BetaStrip => null,
+            BetaPassthrough => anthropicBeta,
+            _ => betaMode,
+        };
+        if (!string.IsNullOrEmpty(beta))
+        {
+            request.Headers.TryAddWithoutValidation("anthropic-beta", beta);
         }
 
         // ResponseHeadersRead so SSE streams flow through incrementally.

@@ -483,6 +483,30 @@ matched API; keep the OpenAI path for future OpenAI-only hosts like Ollama):
 Still unverified against real Azure: the passthrough with a real Claude deployment
 (qhub-sweden `claude-sonnet-4-6`) — TESTING.md Stage 7.
 
+## Phase 9.1 — Stage 7 findings: strip `anthropic-beta` by default — DONE
+
+Real Stage 7 run (Framework, v0.3.0):
+
+- **7a PASS** — direct `/v1/messages` call reached the real `claude-sonnet-4-6`
+  through auto-detection + passthrough ("SONNET OK", genuine `msg_...` id/usage).
+- **7b FAIL (new defect, fixed here)** — detection correct, but Foundry 400'd:
+  `Unexpected value(s) 'advisor-tool-2026-03-01' for the 'anthropic-beta' header`.
+  Claude Code sends opt-in beta flags when it believes it's talking to genuine
+  Anthropic infrastructure (triggered by the claude-* model name); **Foundry
+  hard-rejects unrecognised beta values instead of ignoring them** like the real
+  Anthropic API. Byte-faithful forwarding of that one header is therefore exactly
+  wrong. Fix: `Foundry__AnthropicBeta` = `strip` (default — beta features degrade
+  gracefully when the server doesn't advertise them) | `passthrough` | literal
+  replacement list. The strip is logged (once per request) so it's visible in
+  diagnosis. The fake Foundry in `tools/local-e2e` now mirrors the hard-reject, so
+  the E2E anthropic leg fails if the default ever regresses — both legs re-PASS
+  with the real `claude` CLI (which does send the advisor flag). 38 tests.
+- **7c FAIL (confirmed model limit, no code change)** — gpt-4.1 through the bridge,
+  with the Phase 8.2 ordering fix live and a clean 200, still fabricated instead of
+  calling Read. The bridge is correct; **gpt-4.1 is simply not reliable as a Claude
+  Code backend**. README now says so and points bridge users with Claude
+  deployments at the passthrough.
+
 ## Phase 10 — Polish (remaining)
 
 - Real incremental streaming for the **bridge** path (`/v1/chat/completions` and

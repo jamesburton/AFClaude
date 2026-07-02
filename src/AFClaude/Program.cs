@@ -455,6 +455,13 @@ static async Task ForwardAnthropicAsync(
     ILogger logger,
     CancellationToken cancellationToken)
 {
+    var clientBeta = http.Request.Headers["anthropic-beta"].FirstOrDefault();
+    if (!string.IsNullOrEmpty(clientBeta) && anthropic.BetaMode == FoundryAnthropicClient.BetaStrip)
+    {
+        logger.LogInformation(
+            "Stripping client anthropic-beta '{Beta}' — Foundry rejects unknown beta flags (override via Foundry__AnthropicBeta)", clientBeta);
+    }
+
     HttpResponseMessage upstream;
     try
     {
@@ -462,7 +469,7 @@ static async Task ForwardAnthropicAsync(
             rawBody,
             path,
             http.Request.Headers["anthropic-version"].FirstOrDefault(),
-            http.Request.Headers["anthropic-beta"].FirstOrDefault(),
+            clientBeta,
             cancellationToken);
     }
     catch (Exception ex)

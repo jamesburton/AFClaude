@@ -131,6 +131,28 @@ app.MapPost("/anthropic/v1/messages", async (HttpContext http) =>
     }
 
     using var doc = JsonDocument.Parse(body);
+
+    // Real Foundry validates the body strictly and 400s on beta-gated fields
+    // (observed live: "context_management: Extra inputs are not permitted") — mimic
+    // it for ANY non-standard top-level key so the E2E catches future claude fields.
+    var standardFields = new HashSet<string>
+    {
+        "model", "messages", "max_tokens", "system", "metadata", "stop_sequences",
+        "stream", "temperature", "top_k", "top_p", "tools", "tool_choice",
+        "thinking", "service_tier",
+    };
+    var extraField = doc.RootElement.EnumerateObject().Select(p => p.Name).FirstOrDefault(k => !standardFields.Contains(k));
+    if (extraField is not null)
+    {
+        http.Response.StatusCode = 400;
+        await http.Response.WriteAsJsonAsync(new
+        {
+            type = "error",
+            error = new { type = "invalid_request_error", message = $"{extraField}: Extra inputs are not permitted" }
+        });
+        return;
+    }
+
     var stream = doc.RootElement.TryGetProperty("stream", out var s) && s.ValueKind == JsonValueKind.True;
     var isProbeCall = doc.RootElement.TryGetProperty("max_tokens", out var mt)
         && mt.ValueKind == JsonValueKind.Number && mt.GetInt32() == 1;

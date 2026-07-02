@@ -10,7 +10,7 @@ resources.
 > v0.2.1/v0.2.2 re-test — 6a/6b PASS, 6c FAIL differently: trace mode showed the
 > bridge mapping Claude Code's trailing `role:"system"` hook message to a final
 > *user* turn, burying the task (fixed in v0.2.3: system-role preserved in place;
-> PLAN.md Phase 8.2). **For a v0.3.1 re-test, only Stage 7b needs re-running** (7a passed on v0.3.0; 7b failed on Foundry rejecting Claude Code's `anthropic-beta` flag — v0.3.1 strips it by default; 7c confirmed a gpt-4.1 model limit, no re-test needed).
+> PLAN.md Phase 8.2). **For a v0.3.2 re-test, only Stage 7b needs re-running** (v0.3.1 fixed the `anthropic-beta` header rejection but the run then hit Foundry rejecting the beta-gated `context_management` BODY field — v0.3.2 filters the body to standard Messages API fields by default; 7a passed on v0.3.0, 7c confirmed a gpt-4.1 model limit).
 > The account needs the "Cognitive Services OpenAI User" role on the resource —
 > already granted on qhub-infra-resource during the first run.
 
@@ -59,7 +59,7 @@ PASS: `az account show` returns the expected org tenant; a deployment is identif
 
 ```powershell
 $env:Foundry__Endpoint = ""; $env:Foundry__Deployment = ""
-dnx AFClaude@0.3.1 -y
+dnx AFClaude@0.3.2 -y
 ```
 
 PASS: downloads from nuget.org (first run may take ~a minute) and exits with an
@@ -73,7 +73,7 @@ Start the proxy on a fixed port (background job), then hit it:
 
 ```powershell
 $env:ASPNETCORE_URLS = "http://127.0.0.1:31399"
-$proxy = Start-Job { dnx AFClaude@0.3.1 -y -- --http }
+$proxy = Start-Job { dnx AFClaude@0.3.2 -y -- --http }
 Start-Sleep -Seconds 20   # first run resolves the tool; check Receive-Job $proxy if unsure
 
 Invoke-RestMethod http://127.0.0.1:31399/v1/models | ConvertTo-Json -Depth 5
@@ -158,7 +158,7 @@ Stop the proxy: `Stop-Job $proxy; Remove-Job $proxy`.
 ## Stage 5 — MCP surface (`ask_foundry`)
 
 ```powershell
-claude mcp add afclaude --env Foundry__Endpoint=$env:Foundry__Endpoint --env Foundry__Deployment=$env:Foundry__Deployment -- dnx AFClaude@0.3.1 -y
+claude mcp add afclaude --env Foundry__Endpoint=$env:Foundry__Endpoint --env Foundry__Deployment=$env:Foundry__Deployment -- dnx AFClaude@0.3.2 -y
 claude -p "Use the ask_foundry tool to ask: 'Reply with exactly MCP OK'. Report the tool's response verbatim." --allowedTools "mcp__afclaude__ask_foundry"
 claude mcp remove afclaude   # cleanup
 ```
@@ -172,7 +172,7 @@ the tool reached Foundry). If `claude mcp add` syntax differs on this version,
 **6a — pipeline smoke (safe, non-interactive):**
 
 ```powershell
-dnx AFClaude@0.3.1 -y -- launch --version
+dnx AFClaude@0.3.2 -y -- launch --version
 ```
 
 PASS: prints `AFClaude proxy listening on http://127.0.0.1:31337 ...`, then the
@@ -181,7 +181,7 @@ claude version, exits 0. (Port busy? Set `$env:AFClaude__Launch__Port = "31401"`
 **6b — real text turn through claude (print mode, non-interactive):**
 
 ```powershell
-dnx AFClaude@0.3.1 -y -- launch -p "Reply with exactly: LAUNCH OK"
+dnx AFClaude@0.3.2 -y -- launch -p "Reply with exactly: LAUNCH OK"
 ```
 
 PASS: prints `LAUNCH OK`. **Known-unverified assumption being tested here:**
@@ -194,7 +194,7 @@ prompt):
 
 ```powershell
 Set-Content -Path "$env:TEMP\afclaude-probe.txt" -Value "PROBE-VALUE-12345"
-dnx AFClaude@0.3.1 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+dnx AFClaude@0.3.2 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
 ```
 
 PASS: prints `PROBE-VALUE-12345`. This is the end-to-end proof of Phase 7:
@@ -223,7 +223,7 @@ Re-run 6c with tracing enabled:
 
 ```powershell
 $env:AFClaude__TraceDir = "$env:TEMP\afclaude-trace"
-dnx AFClaude@0.3.1 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+dnx AFClaude@0.3.2 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
 ```
 
 Then inspect `$env:TEMP\afclaude-trace` — per request `NNN`:
@@ -260,7 +260,7 @@ $env:Foundry__Deployment = "claude-sonnet-4-6"
 
 ```powershell
 $env:ASPNETCORE_URLS = "http://127.0.0.1:31399"
-$proxy = Start-Job { dnx AFClaude@0.3.1 -y -- --http }
+$proxy = Start-Job { dnx AFClaude@0.3.2 -y -- --http }
 Start-Sleep -Seconds 20
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:31399/v1/messages -ContentType 'application/json' -Body (@{
   model = $env:Foundry__Deployment; max_tokens = 100
@@ -276,7 +276,7 @@ non-zero usage. (First call includes the one-off 1-token detection probe.)
 
 ```powershell
 Set-Content -Path "$env:TEMP\afclaude-probe.txt" -Value "PROBE-VALUE-12345"
-dnx AFClaude@0.3.1 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+dnx AFClaude@0.3.2 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
 ```
 
 PASS: stderr shows `Native Anthropic (Claude) deployment detected — /v1/messages
@@ -284,11 +284,12 @@ runs as a direct passthrough.` after the token warm-up, and the output is
 `PROBE-VALUE-12345`. Record: detection line seen? Streaming felt incremental?
 Any `count_tokens` calls in a trace (now proxied rather than 404)?
 
-> v0.3.1: Claude Code's `anthropic-beta` feature flags (e.g.
-> `advisor-tool-2026-03-01`) are stripped by default — Foundry 400s on beta values
-> it doesn't recognise (the v0.3.0 7b failure). Override via
-> `Foundry__AnthropicBeta` (`passthrough` or a literal list) if Foundry gains
-> beta support.
+> v0.3.1/v0.3.2: Claude Code's beta feature flags are stripped at BOTH levels by
+> default — the `anthropic-beta` header (v0.3.0 7b failure) and beta-gated body
+> fields like `context_management` (v0.3.1 7b failure); Foundry 400s on both where
+> the real Anthropic API ignores them. Expect two log lines: "Stripping client
+> anthropic-beta ..." and "Dropping non-standard request field(s) ...". Override
+> via `Foundry__AnthropicBeta` / `Foundry__AnthropicBody` if Foundry gains support.
 
 **7c — regression check on the GPT deployment (bridge path, v0.2.3 fix):** point
 `Foundry__Endpoint`/`Foundry__Deployment` back at gpt-4.1 (qhub-infra-resource)

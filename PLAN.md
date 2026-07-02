@@ -507,6 +507,26 @@ Real Stage 7 run (Framework, v0.3.0):
   Code backend**. README now says so and points bridge users with Claude
   deployments at the passthrough.
 
+## Phase 9.2 — Strict body filtering for the passthrough — DONE
+
+The v0.3.1 Stage 7b re-run got past the header rejection (strip confirmed working
+— all 8 beta flags dropped) and hit the same problem one layer deeper: **Foundry
+also rejects beta-gated top-level BODY fields** — `400 context_management: Extra
+inputs are not permitted`. Claude Code sends the field because it assumes the
+corresponding beta feature exists; Foundry's schema validation is strict where
+the real Anthropic API is tolerant.
+
+Fix mirrors the header policy, as an allowlist rather than a blocklist (a
+blocklist re-breaks on every new claude feature): `Foundry__AnthropicBody` =
+`strict` (default — keeps only the standard Messages API top-level fields:
+model/messages/max_tokens/system/metadata/stop_sequences/stream/temperature/
+top_k/top_p/tools/tool_choice/thinking/service_tier; drops and logs everything
+else) | `passthrough`. Applied in `PrepareBody` alongside the model rewrite, so
+`count_tokens` gets the same treatment. The fake Foundry now mimics the strict
+schema for ANY non-standard key, so the E2E anthropic leg catches future claude
+body fields automatically — both legs re-PASS with the real `claude` CLI.
+40 tests.
+
 ## Phase 10 — Polish (remaining)
 
 - Real incremental streaming for the **bridge** path (`/v1/chat/completions` and

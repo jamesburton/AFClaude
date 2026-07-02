@@ -470,7 +470,10 @@ static async Task ForwardAnthropicAsync(
             path,
             http.Request.Headers["anthropic-version"].FirstOrDefault(),
             clientBeta,
-            cancellationToken);
+            cancellationToken,
+            dropped => logger.LogInformation(
+                "Dropping non-standard request field(s) {Fields} — Foundry rejects unknown body fields (override via Foundry__AnthropicBody)",
+                string.Join(", ", dropped)));
     }
     catch (Exception ex)
     {

@@ -60,9 +60,26 @@ internal sealed class FoundryAnthropicClient(
     Uri endpoint,
     string deployment,
     TokenCredential credential,
-    string betaMode = FoundryAnthropicClient.BetaStrip)
+    string betaMode = FoundryAnthropicClient.BetaStrip,
+    string bodyMode = FoundryAnthropicClient.BodyStrict)
 {
     public const string DefaultAnthropicVersion = "2023-06-01";
+
+    // Request-body policy, the body-level twin of the anthropic-beta header policy:
+    // Claude Code also sends beta-gated top-level FIELDS (observed live:
+    // "context_management") and Foundry's strict schema 400s on unknown keys
+    // ("Extra inputs are not permitted") instead of ignoring them like the real
+    // Anthropic API. strict (default) keeps only the standard Messages API fields;
+    // passthrough forwards the body untouched.
+    public const string BodyStrict = "strict";
+    public const string BodyPassthrough = "passthrough";
+
+    private static readonly HashSet<string> StandardMessagesFields = new(StringComparer.Ordinal)
+    {
+        "model", "messages", "max_tokens", "system", "metadata", "stop_sequences",
+        "stream", "temperature", "top_k", "top_p", "tools", "tool_choice",
+        "thinking", "service_tier",
+    };
 
     // anthropic-beta handling. Claude Code sends opt-in feature flags (e.g.
     // "advisor-tool-2026-03-01") when it believes it's talking to real Anthropic
@@ -82,14 +99,15 @@ internal sealed class FoundryAnthropicClient(
         string path,
         string? anthropicVersion,
         string? anthropicBeta,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<IReadOnlyList<string>>? onDroppedBodyFields = null)
     {
         var token = await credential.GetTokenAsync(
             new TokenRequestContext([FoundryClientFactory.TokenScope]), cancellationToken);
 
         var request = new HttpRequestMessage(HttpMethod.Post, new Uri(endpoint, $"anthropic/v1/{path}"))
         {
-            Content = new StringContent(RewriteModel(rawBody), Encoding.UTF8, "application/json"),
+            Content = new StringContent(PrepareBody(rawBody, onDroppedBodyFields), Encoding.UTF8, "application/json"),
         };
         request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token.Token}");
         request.Headers.TryAddWithoutValidation("anthropic-version",
@@ -168,13 +186,29 @@ internal sealed class FoundryAnthropicClient(
         return sb.ToString();
     }
 
-    internal string RewriteModel(string rawBody)
+    // Rewrites model to the configured deployment and, in strict body mode, drops
+    // top-level fields outside the standard Messages API (reported via the callback).
+    internal string PrepareBody(string rawBody, Action<IReadOnlyList<string>>? onDroppedFields = null)
     {
         try
         {
             if (JsonNode.Parse(rawBody) is JsonObject obj)
             {
                 obj["model"] = deployment;
+
+                if (bodyMode == BodyStrict)
+                {
+                    var dropped = obj.Select(p => p.Key).Where(k => !StandardMessagesFields.Contains(k)).ToList();
+                    foreach (var key in dropped)
+                    {
+                        obj.Remove(key);
+                    }
+                    if (dropped.Count > 0)
+                    {
+                        onDroppedFields?.Invoke(dropped);
+                    }
+                }
+
                 return obj.ToJsonString();
             }
         }

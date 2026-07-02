@@ -73,8 +73,13 @@ internal static class FoundryClientFactory
         var betaMode = configuration["Foundry:AnthropicBeta"];
         betaMode = string.IsNullOrWhiteSpace(betaMode) ? FoundryAnthropicClient.BetaStrip : betaMode.Trim();
 
+        // Body policy: strict (default — Foundry also 400s on beta-gated top-level
+        // body fields like context_management) or passthrough.
+        var bodyMode = configuration["Foundry:AnthropicBody"];
+        bodyMode = string.IsNullOrWhiteSpace(bodyMode) ? FoundryAnthropicClient.BodyStrict : bodyMode.Trim();
+
         var azureClient = new AzureOpenAIClient(endpoint, credential);
-        var anthropic = new FoundryAnthropicClient(SharedHttp, endpoint, deployment, credential, betaMode);
+        var anthropic = new FoundryAnthropicClient(SharedHttp, endpoint, deployment, credential, betaMode, bodyMode);
         var resolver = new FoundryApiResolver(configuredApi, anthropic.ProbeAsync);
         return new FoundryClient(azureClient.GetChatClient(deployment), anthropic, resolver, deployment, credential);
     }

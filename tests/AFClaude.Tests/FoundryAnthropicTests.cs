@@ -114,13 +114,53 @@ public class FoundryAnthropicTests
     }
 
     [Fact]
-    public void RewriteModel_LeavesUnparseableBodiesUntouched()
+    public void PrepareBody_LeavesUnparseableBodiesUntouched()
     {
         var client = new FoundryAnthropicClient(
             new HttpClient(new CapturingHandler(HttpStatusCode.OK, "{}")),
             new Uri("https://r.example/"), "dep", new StaticCredential("t"));
 
-        Assert.Equal("{not json", client.RewriteModel("{not json"));
+        Assert.Equal("{not json", client.PrepareBody("{not json"));
+    }
+
+    // Regression: after v0.3.1 stripped the anthropic-beta HEADER, the real Claude Code
+    // request still failed — Foundry also 400s on beta-gated BODY fields ("400
+    // context_management: Extra inputs are not permitted", observed live).
+    [Fact]
+    public void PrepareBody_StrictMode_DropsNonStandardFieldsAndReportsThem()
+    {
+        var client = new FoundryAnthropicClient(
+            new HttpClient(new CapturingHandler(HttpStatusCode.OK, "{}")),
+            new Uri("https://r.example/"), "claude-sonnet-4-6", new StaticCredential("t"));
+
+        IReadOnlyList<string>? dropped = null;
+        var body = client.PrepareBody(
+            """{"model":"alias","max_tokens":5,"messages":[],"stream":true,"temperature":1,"tools":[],"tool_choice":{"type":"auto"},"system":"s","metadata":{},"context_management":{"edits":[]},"mcp_servers":[]}""",
+            d => dropped = d);
+
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("claude-sonnet-4-6", doc.RootElement.GetProperty("model").GetString());
+        Assert.False(doc.RootElement.TryGetProperty("context_management", out _));
+        Assert.False(doc.RootElement.TryGetProperty("mcp_servers", out _));
+        // Standard fields survive.
+        Assert.True(doc.RootElement.TryGetProperty("tools", out _));
+        Assert.True(doc.RootElement.TryGetProperty("stream", out _));
+        Assert.Equal(["context_management", "mcp_servers"], dropped);
+    }
+
+    [Fact]
+    public void PrepareBody_PassthroughMode_KeepsNonStandardFields()
+    {
+        var client = new FoundryAnthropicClient(
+            new HttpClient(new CapturingHandler(HttpStatusCode.OK, "{}")),
+            new Uri("https://r.example/"), "dep", new StaticCredential("t"),
+            bodyMode: FoundryAnthropicClient.BodyPassthrough);
+
+        var body = client.PrepareBody("""{"model":"m","context_management":{"edits":[]}}""");
+
+        using var doc = JsonDocument.Parse(body);
+        Assert.True(doc.RootElement.TryGetProperty("context_management", out _));
+        Assert.Equal("dep", doc.RootElement.GetProperty("model").GetString());
     }
 
     [Fact]

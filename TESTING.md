@@ -4,12 +4,13 @@ Instructions for an agent (Claude Code or similar) running on a machine where
 `az login` has already been completed for an organisation with Azure AI Foundry
 resources.
 
-> **Run history:** the full plan ran on v0.2.0 (Framework, 2026-07-02): Stages 1–6b
-> PASS, Stage 6c FAIL on `AzureCliCredential`'s 13s process timeout — fixed in
-> v0.2.1 (60s default + `Foundry__CliTimeoutSeconds` + token cache + launch-mode
-> warm-up; see PLAN.md Phase 8). **For a v0.2.1 re-test, only Stage 6 needs
-> re-running** (plus Stage 2 as a quick sanity check). Expect new behaviour in
-> Stage 6: an "Acquiring Azure token via 'az' ..." line before claude starts.
+> **Run history (Framework, 2026-07-02):** v0.2.0 full plan — Stages 1–6b PASS, 6c
+> FAIL on the az 13s process timeout (fixed in v0.2.1: 60s default +
+> `Foundry__CliTimeoutSeconds` + token cache + launch warm-up; PLAN.md Phase 8).
+> v0.2.1/v0.2.2 re-test — 6a/6b PASS, 6c FAIL differently: trace mode showed the
+> bridge mapping Claude Code's trailing `role:"system"` hook message to a final
+> *user* turn, burying the task (fixed in v0.2.3: system-role preserved in place;
+> PLAN.md Phase 8.2). **For a v0.2.3 re-test, only Stage 6c needs re-running.**
 > The account needs the "Cognitive Services OpenAI User" role on the resource —
 > already granted on qhub-infra-resource during the first run.
 
@@ -58,7 +59,7 @@ PASS: `az account show` returns the expected org tenant; a deployment is identif
 
 ```powershell
 $env:Foundry__Endpoint = ""; $env:Foundry__Deployment = ""
-dnx AFClaude@0.2.1 -y
+dnx AFClaude@0.2.3 -y
 ```
 
 PASS: downloads from nuget.org (first run may take ~a minute) and exits with an
@@ -72,7 +73,7 @@ Start the proxy on a fixed port (background job), then hit it:
 
 ```powershell
 $env:ASPNETCORE_URLS = "http://127.0.0.1:31399"
-$proxy = Start-Job { dnx AFClaude@0.2.1 -y -- --http }
+$proxy = Start-Job { dnx AFClaude@0.2.3 -y -- --http }
 Start-Sleep -Seconds 20   # first run resolves the tool; check Receive-Job $proxy if unsure
 
 Invoke-RestMethod http://127.0.0.1:31399/v1/models | ConvertTo-Json -Depth 5
@@ -157,7 +158,7 @@ Stop the proxy: `Stop-Job $proxy; Remove-Job $proxy`.
 ## Stage 5 — MCP surface (`ask_foundry`)
 
 ```powershell
-claude mcp add afclaude --env Foundry__Endpoint=$env:Foundry__Endpoint --env Foundry__Deployment=$env:Foundry__Deployment -- dnx AFClaude@0.2.1 -y
+claude mcp add afclaude --env Foundry__Endpoint=$env:Foundry__Endpoint --env Foundry__Deployment=$env:Foundry__Deployment -- dnx AFClaude@0.2.3 -y
 claude -p "Use the ask_foundry tool to ask: 'Reply with exactly MCP OK'. Report the tool's response verbatim." --allowedTools "mcp__afclaude__ask_foundry"
 claude mcp remove afclaude   # cleanup
 ```
@@ -171,7 +172,7 @@ the tool reached Foundry). If `claude mcp add` syntax differs on this version,
 **6a — pipeline smoke (safe, non-interactive):**
 
 ```powershell
-dnx AFClaude@0.2.1 -y -- launch --version
+dnx AFClaude@0.2.3 -y -- launch --version
 ```
 
 PASS: prints `AFClaude proxy listening on http://127.0.0.1:31337 ...`, then the
@@ -180,7 +181,7 @@ claude version, exits 0. (Port busy? Set `$env:AFClaude__Launch__Port = "31401"`
 **6b — real text turn through claude (print mode, non-interactive):**
 
 ```powershell
-dnx AFClaude@0.2.1 -y -- launch -p "Reply with exactly: LAUNCH OK"
+dnx AFClaude@0.2.3 -y -- launch -p "Reply with exactly: LAUNCH OK"
 ```
 
 PASS: prints `LAUNCH OK`. **Known-unverified assumption being tested here:**
@@ -193,7 +194,7 @@ prompt):
 
 ```powershell
 Set-Content -Path "$env:TEMP\afclaude-probe.txt" -Value "PROBE-VALUE-12345"
-dnx AFClaude@0.2.1 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+dnx AFClaude@0.2.3 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
 ```
 
 PASS: prints `PROBE-VALUE-12345`. This is the end-to-end proof of Phase 7:
@@ -206,21 +207,23 @@ record it; it means Claude Code requires it and it must be added.
 
 ## Stage 6c diagnosis — trace mode (v0.2.2+)
 
-Context: the v0.2.1 Stage 6c failure mode (HTTP 200, plausible-but-wrong text,
-file never read) was investigated with a local end-to-end harness
-(`tools/local-e2e/run-e2e.ps1` — real `claude` CLI, fake `az`, fake Azure model
-scripting a Read tool call). **The bridge passed cleanly**: claude's real 119KB
-request with 31 tools translated correctly, the tool_use block was parsed and
-executed by claude, and the tool_result round-tripped into the final answer. So
-wrong-content failures against a real deployment indicate the **model** is not
-emitting tool calls (Claude Code's prompts are Claude-tuned), not a proxy defect.
-Trace mode produces the evidence either way.
+Context: the v0.2.1 Stage 6c failure (HTTP 200, plausible-but-wrong text, file
+never read) was diagnosed **from this trace mode's output on the v0.2.2 run**: the
+bridge mapped Claude Code's trailing `role: "system"` hook-injection message (a
+26.5KB skill listing placed after the real task) to a final **user** turn, so the
+model responded to boilerplate instead of calling tools. **Fixed in v0.2.3** —
+system-role messages inside the messages array now stay system-role in place;
+regression-tested and re-verified with the local harness
+(`tools/local-e2e/run-e2e.ps1`, real `claude` CLI against a fake model).
+**Re-run Stage 6c on v0.2.3.** If it still misbehaves, trace mode below produces
+the evidence: check whether the final message in `azure-request.json` is the
+user's task (correct) and whether `azure-response.json` contains `tool_calls`.
 
 Re-run 6c with tracing enabled:
 
 ```powershell
 $env:AFClaude__TraceDir = "$env:TEMP\afclaude-trace"
-dnx AFClaude@0.2.2 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+dnx AFClaude@0.2.3 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
 ```
 
 Then inspect `$env:TEMP\afclaude-trace` — per request `NNN`:

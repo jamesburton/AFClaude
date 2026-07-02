@@ -177,6 +177,53 @@ public class AnthropicBridgeTests
         Assert.Empty(doc.RootElement.GetProperty("input").EnumerateObject());
     }
 
+    // Regression: Claude Code injects hook/skill content as role:"system" entries inside
+    // the messages array, AFTER the real user task. Mapping those to user-role (the old
+    // behaviour) made a trailing boilerplate dump the model's most recent user turn —
+    // observed live burying a file-read instruction so the model answered the dump
+    // instead of calling any tool.
+    [Fact]
+    public void ToChatMessages_TrailingSystemRoleMessageStaysSystem()
+    {
+        var request = Parse("""
+            {
+              "model": "m",
+              "max_tokens": 10,
+              "messages": [
+                { "role": "user", "content": [ { "type": "text", "text": "Read the probe file." } ] },
+                { "role": "system", "content": "<skill listing boilerplate>" }
+              ]
+            }
+            """);
+
+        var messages = AnthropicBridge.ToChatMessages(request);
+
+        Assert.Collection(messages,
+            m => Assert.Equal("Read the probe file.", Assert.IsType<UserChatMessage>(m).Content[0].Text),
+            m => Assert.Equal("<skill listing boilerplate>", Assert.IsType<SystemChatMessage>(m).Content[0].Text));
+    }
+
+    [Fact]
+    public void ToChatMessages_SystemRoleWithBlockArrayContentStaysSystem()
+    {
+        var request = Parse("""
+            {
+              "model": "m",
+              "max_tokens": 10,
+              "messages": [
+                { "role": "system", "content": [ { "type": "text", "text": "part one. " }, { "type": "text", "text": "part two." } ] },
+                { "role": "user", "content": "hi" }
+              ]
+            }
+            """);
+
+        var messages = AnthropicBridge.ToChatMessages(request);
+
+        Assert.Collection(messages,
+            m => Assert.Equal("part one. part two.", Assert.IsType<SystemChatMessage>(m).Content[0].Text),
+            m => Assert.IsType<UserChatMessage>(m));
+    }
+
     [Fact]
     public void ToChatMessages_PlainStringContentStillWorks()
     {

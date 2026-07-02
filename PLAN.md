@@ -412,6 +412,35 @@ Follow-up options if launch mode against non-Claude models matters (not started)
 try deployments with stronger agentic function-calling behaviour, and capture a
 real traced exchange from an affected machine to confirm the model-side diagnosis.
 
+## Phase 8.2 — Trailing system-role message defect — DONE (corrects 8.1's verdict)
+
+The v0.2.2 traced re-run on Framework proved Phase 8.1's "model behaviour, not a
+bridge defect" conclusion **wrong in one specific way**. The trace showed: all 32
+tools translated correctly, but the Azure request ended with a **26.5KB user-role
+message** containing Claude Code's SessionStart-hook skill listing — originally a
+**`role: "system"` entry inside the Anthropic `messages` array** (not valid per
+the public Anthropic API, but real Claude Code gateway traffic), placed *after*
+the user's actual task. The bridge mapped every non-assistant role to user, so
+the model's most recent user turn was boilerplate and the 100-char file-read
+instruction sat buried two messages back; `azure-response.json` showed plain text,
+zero `tool_calls`. Why Phase 8.1's harness missed it: the fake model keyed on the
+probe marker anywhere in the payload, so it was immune to burial — and the same
+trailing-system idiom WAS present in the local traces (claude sent an 11KB
+`role: "system"` skills message here too), already mistranslated, silently
+tolerated by the fake.
+
+Fix (`AnthropicBridge.ToChatMessages`): `role: "system"` messages (string or
+block-array content) now map to `SystemChatMessage` **in place** — position
+preserved, role faithful; OpenAI accepts system messages anywhere in the list and
+models treat them as context rather than "the latest user request". Two
+regression tests pin the exact real-world shape (24 total). Verified live: the
+local E2E still passes and its trace now shows `system, user, system` ordering
+with the task as the final user turn.
+
+Moral for the record: "protocol-correct" (valid JSON, right schema, tools intact)
+is not the same as "semantically faithful" — message-role translation shapes what
+the model attends to.
+
 ## Phase 9 — Polish (remaining)
 
 - Real incremental streaming (both `/v1/chat/completions` and `/v1/messages`),

@@ -86,11 +86,19 @@ internal static class AnthropicBridge
         foreach (var m in request.Messages)
         {
             var isAssistant = string.Equals(m.Role, "assistant", StringComparison.OrdinalIgnoreCase);
+            // Claude Code injects hook/skill content as role:"system" entries INSIDE the
+            // messages array (not valid per the public Anthropic API, but real gateway
+            // traffic). These must stay system-role in place: mapping them to user (the
+            // old behaviour) made a trailing multi-KB boilerplate dump the model's "most
+            // recent user turn", burying the actual task and suppressing tool calls.
+            var isSystem = string.Equals(m.Role, "system", StringComparison.OrdinalIgnoreCase);
 
             if (m.Content.ValueKind == JsonValueKind.String)
             {
                 var text = m.Content.GetString() ?? string.Empty;
-                messages.Add(isAssistant ? new AssistantChatMessage(text) : new UserChatMessage(text));
+                messages.Add(isAssistant ? new AssistantChatMessage(text)
+                    : isSystem ? new SystemChatMessage(text)
+                    : (ChatMessage)new UserChatMessage(text));
                 continue;
             }
 
@@ -102,6 +110,10 @@ internal static class AnthropicBridge
             if (isAssistant)
             {
                 AddAssistantMessage(messages, m.Content);
+            }
+            else if (isSystem)
+            {
+                messages.Add(new SystemChatMessage(AnthropicContent.ExtractText(m.Content)));
             }
             else
             {

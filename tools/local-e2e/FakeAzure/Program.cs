@@ -91,6 +91,134 @@ async Task Handle(HttpContext http)
 app.MapPost("/openai/deployments/{dep}/chat/completions", Handle);
 app.MapPost("/openai/v1/chat/completions", Handle);
 
+// Native Anthropic Messages surface, as served for Claude deployments on Foundry.
+// Mimics the real behaviour: 400 without an anthropic-version header; otherwise
+// scripts the same probe-file scenario in Anthropic wire shapes (SSE when stream:true).
+app.MapPost("/anthropic/v1/messages", async (HttpContext http) =>
+{
+    string body;
+    using (var reader = new StreamReader(http.Request.Body))
+    {
+        body = await reader.ReadToEndAsync();
+    }
+    var n = Interlocked.Increment(ref seq);
+    File.WriteAllText(Path.Combine(logDir, $"{n:D3}-anthropic-request.json"),
+        $"POST /anthropic/v1/messages\nversion={http.Request.Headers["anthropic-version"]}\nauth={http.Request.Headers.Authorization}\n{body}");
+
+    if (!http.Request.Headers.ContainsKey("anthropic-version"))
+    {
+        http.Response.StatusCode = 400;
+        await http.Response.WriteAsJsonAsync(new
+        {
+            type = "error",
+            error = new { type = "invalid_request_error", message = "anthropic-version: header is required" }
+        });
+        return;
+    }
+
+    using var doc = JsonDocument.Parse(body);
+    var stream = doc.RootElement.TryGetProperty("stream", out var s) && s.ValueKind == JsonValueKind.True;
+    var isProbeCall = doc.RootElement.TryGetProperty("max_tokens", out var mt)
+        && mt.ValueKind == JsonValueKind.Number && mt.GetInt32() == 1;
+
+    string? toolResultText = null;
+    if (doc.RootElement.TryGetProperty("messages", out var msgs))
+    {
+        foreach (var m in msgs.EnumerateArray())
+        {
+            if (m.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var block in c.EnumerateArray())
+                {
+                    if (block.TryGetProperty("type", out var t) && t.GetString() == "tool_result")
+                    {
+                        toolResultText = block.TryGetProperty("content", out var rc) ? rc.ToString() : "";
+                    }
+                }
+            }
+        }
+    }
+
+    string? textReply = null;
+    var stopReason = "end_turn";
+    var isToolUse = false;
+    if (toolResultText is not null)
+    {
+        textReply = $"TOOL RESULT RECEIVED >>>{toolResultText}<<<";
+    }
+    else if (!isProbeCall && body.Contains(probeMarker)
+        && doc.RootElement.TryGetProperty("tools", out var tools)
+        && tools.ValueKind == JsonValueKind.Array && tools.GetArrayLength() > 0)
+    {
+        isToolUse = true;
+        stopReason = "tool_use";
+    }
+    else
+    {
+        textReply = "OK";
+    }
+
+    if (!stream)
+    {
+        object contentBlock = isToolUse
+            ? new { type = "tool_use", id = "toolu_fake_1", name = "Read", input = new { file_path = probePath } }
+            : new { type = "text", text = textReply };
+        var resp = new
+        {
+            id = $"msg_fake_{n}",
+            type = "message",
+            role = "assistant",
+            model = "claude-fake",
+            content = new[] { contentBlock },
+            stop_reason = stopReason,
+            stop_sequence = (string?)null,
+            usage = new { input_tokens = 42, output_tokens = 7 },
+        };
+        File.WriteAllText(Path.Combine(logDir, $"{n:D3}-anthropic-response.json"), JsonSerializer.Serialize(resp));
+        await http.Response.WriteAsJsonAsync(resp);
+        return;
+    }
+
+    http.Response.ContentType = "text/event-stream";
+    async Task Sse(string ev, object data)
+    {
+        await http.Response.WriteAsync($"event: {ev}\ndata: {JsonSerializer.Serialize(data)}\n\n");
+        await http.Response.Body.FlushAsync();
+    }
+
+    await Sse("message_start", new
+    {
+        type = "message_start",
+        message = new
+        {
+            id = $"msg_fake_{n}",
+            type = "message",
+            role = "assistant",
+            content = Array.Empty<object>(),
+            model = "claude-fake",
+            stop_reason = (string?)null,
+            stop_sequence = (string?)null,
+            usage = new { input_tokens = 42, output_tokens = 0 },
+        }
+    });
+
+    if (isToolUse)
+    {
+        await Sse("content_block_start", new { type = "content_block_start", index = 0, content_block = new { type = "tool_use", id = "toolu_fake_1", name = "Read", input = new { } } });
+        await Sse("content_block_delta", new { type = "content_block_delta", index = 0, delta = new { type = "input_json_delta", partial_json = JsonSerializer.Serialize(new { file_path = probePath }) } });
+    }
+    else
+    {
+        await Sse("content_block_start", new { type = "content_block_start", index = 0, content_block = new { type = "text", text = "" } });
+        await Sse("content_block_delta", new { type = "content_block_delta", index = 0, delta = new { type = "text_delta", text = textReply } });
+    }
+
+    await Sse("content_block_stop", new { type = "content_block_stop", index = 0 });
+    await Sse("message_delta", new { type = "message_delta", delta = new { stop_reason = stopReason, stop_sequence = (string?)null }, usage = new { output_tokens = 7 } });
+    await Sse("message_stop", new { type = "message_stop" });
+    File.WriteAllText(Path.Combine(logDir, $"{n:D3}-anthropic-response.txt"), $"SSE stop_reason={stopReason}");
+});
+
 app.MapFallback(async (HttpContext http) =>
 {
     var body = string.Empty;

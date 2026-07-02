@@ -5,7 +5,7 @@ using ModelContextProtocol.Server;
 namespace AFClaude;
 
 [McpServerToolType]
-internal sealed class FoundryTools(AIAgent agent, ILogger<FoundryTools> logger)
+internal sealed class FoundryTools(AIAgent agent, FoundryClient foundry, ILogger<FoundryTools> logger)
 {
     [McpServerTool(Name = "ask_foundry")]
     [Description(
@@ -18,6 +18,10 @@ internal sealed class FoundryTools(AIAgent agent, ILogger<FoundryTools> logger)
     {
         try
         {
+            if (await foundry.Api.ResolveAsync(cancellationToken) == FoundryApi.Anthropic)
+            {
+                return await foundry.Anthropic.AskAsync(prompt, cancellationToken);
+            }
             var response = await agent.RunAsync(prompt, cancellationToken: cancellationToken);
             return response.Text;
         }

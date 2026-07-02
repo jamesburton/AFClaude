@@ -68,6 +68,7 @@ Set via environment variables (or `appsettings.json` / `dotnet user-secrets` loc
 |-----------------------|-----------------------------------------------------|-------|
 | `Foundry__Endpoint`   | `https://<resource>.cognitiveservices.azure.com/`  | Use whatever `az cognitiveservices account list` reports as `properties.endpoint`. The `.cognitiveservices.azure.com` shape is verified live against a real AIServices/Foundry resource; `.openai.azure.com` resource endpoints should work identically. |
 | `Foundry__Deployment` | `gpt-4o-mini`                                       | Deployment name, not the base model name. |
+| `Foundry__Api`        | `auto` (default)                                   | Which API surface serves the deployment. `auto` probes once and prefers the **native Anthropic passthrough** (Claude deployments on Foundry live at `{endpoint}/anthropic/v1/messages`, not the Azure-OpenAI route); `anthropic` / `openai` skip detection. The OpenAI path is retained for OpenAI-compatible deployments and, in future, other OpenAI-only hosts (e.g. Ollama) — that broader use is untested so far. |
 | `Foundry__CliTimeoutSeconds` | `60` (default)                              | How long to wait for the `az` CLI to produce a token. The Azure SDK default (13s) is too short for a cold `az` start on slow or loaded machines (14–24s observed) — AFClaude defaults to 60; raise it if you still see token-timeout errors. |
 | `AFClaude__TraceDir`  | *(unset)*                                          | Opt-in wire tracing for `/v1/messages`: dumps each request's raw Anthropic body, translated Azure request, Azure response, and the reply to numbered files in this directory. For diagnosing translation/model issues. **Traces contain full conversation content** — use a private directory and delete afterwards. |
 
@@ -147,22 +148,29 @@ after `launch` are forwarded straight to `claude` — e.g.
 `dnx AFClaude -y -- launch --dangerously-skip-permissions`. When `claude` exits,
 AFClaude stops the proxy and exits with `claude`'s exit code.
 
-The `/v1/messages` translation bridges Anthropic tool calling to Azure OpenAI
-function-calling in both directions: the `tools` array becomes function-tool
-definitions, `tool_use`/`tool_result` history becomes assistant tool calls and
-tool-role messages, and the model's function calls come back as `tool_use` content
-blocks with `stop_reason: "tool_use"` — so Claude Code's coding-agent behavior
-(Read, Edit, Bash, ...) works in this mode. `max_tokens`, `temperature`, `top_p`,
-and `stop_sequences` pass through as well.
+**Claude deployments (native passthrough).** Claude models on Azure AI Foundry are
+served on a native Anthropic Messages endpoint (`{endpoint}/anthropic/v1/messages`),
+which AFClaude auto-detects and proxies **byte-faithfully** — no translation at all,
+real incremental streaming, `count_tokens` proxied too. Auth is the only added
+plumbing (Entra bearer token + `anthropic-version` header). This is the best-case
+mode: Claude Code talking to a real Claude model, so tool use behaves natively.
 
-> **Current limitations.** Anthropic built-in *server* tools (e.g. web search) have
-> no function-calling counterpart and are skipped, and non-text content blocks
-> (images, thinking) are dropped. Streaming responses are a single coalesced SSE
-> burst rather than true incremental token streaming — the reply arrives all at
-> once.
+**OpenAI-compatible deployments (bridge).** For GPT-family deployments,
+`/v1/messages` bridges Anthropic tool calling to Azure OpenAI function-calling in
+both directions: the `tools` array becomes function-tool definitions,
+`tool_use`/`tool_result` history becomes assistant tool calls and tool-role
+messages, and the model's function calls come back as `tool_use` content blocks
+with `stop_reason: "tool_use"`. `max_tokens`, `temperature`, `top_p`, and
+`stop_sequences` pass through as well.
+
+> **Bridge-mode limitations** (OpenAI-compatible deployments only — none of this
+> applies to the native Claude passthrough). Anthropic built-in *server* tools
+> (e.g. web search) have no function-calling counterpart and are skipped; non-text
+> content blocks (images, thinking) are dropped; streaming responses are a single
+> coalesced SSE burst rather than true incremental token streaming.
 >
-> **The deployed model decides how useful this mode is.** The bridge is verified
-> protocol-correct end-to-end against the real `claude` client
+> **In bridge mode, the deployed model decides how useful launch mode is.** Both
+> paths are verified end-to-end against the real `claude` client
 > (`tools/local-e2e/run-e2e.ps1`), but Claude Code's prompts are tuned for Claude —
 > a non-Claude model may answer in plain text (or fabricate output) instead of
 > calling tools, which looks like "it read the file" while it never did. If tool

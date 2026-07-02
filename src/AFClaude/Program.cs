@@ -31,6 +31,7 @@ static async Task RunMcpAsync(string[] args)
     AIAgent agent = foundry.ChatClient.AsAIAgent(
         instructions: "You are a local proxy agent. Preserve the caller's intent.");
     builder.Services.AddSingleton(agent);
+    builder.Services.AddSingleton(foundry);
 
     builder.Services
         .AddMcpServer()
@@ -73,6 +74,11 @@ static async Task RunLaunchAsync(string[] claudeArgs)
         await foundry.Credential.GetTokenAsync(
             new Azure.Core.TokenRequestContext([FoundryClientFactory.TokenScope]), CancellationToken.None);
         Console.Error.WriteLine("Azure token acquired.");
+
+        var api = await foundry.Api.ResolveAsync(CancellationToken.None);
+        Console.Error.WriteLine(api == FoundryApi.Anthropic
+            ? "Native Anthropic (Claude) deployment detected — /v1/messages runs as a direct passthrough."
+            : "OpenAI-compatible deployment — /v1/messages bridges Anthropic tool use to function-calling.");
     }
     catch (Exception ex)
     {
@@ -116,6 +122,7 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
     }
 
     foundry ??= FoundryClientFactory.Create(builder.Configuration);
+    builder.Services.AddSingleton(foundry);
     builder.Services.AddSingleton(foundry.ChatClient);
     builder.Services.AddSingleton(new DeploymentInfo(foundry.Deployment));
     builder.Services.AddSingleton(new RequestTrace(builder.Configuration["AFClaude:TraceDir"]));
@@ -134,13 +141,48 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
         }
     }));
 
+    // count_tokens exists only on the native Anthropic surface; on OpenAI-shaped
+    // deployments it stays a 404 exactly as before.
+    app.MapPost("/v1/messages/count_tokens", async (
+        HttpContext http,
+        FoundryClient foundry,
+        RequestTrace trace,
+        ILogger<Program> logger,
+        CancellationToken cancellationToken) =>
+    {
+        if (await foundry.Api.ResolveAsync(cancellationToken) != FoundryApi.Anthropic)
+        {
+            http.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+        string rawBody;
+        using (var reader = new StreamReader(http.Request.Body))
+        {
+            rawBody = await reader.ReadToEndAsync(cancellationToken);
+        }
+        var seq = trace.Enabled ? trace.Next() : 0;
+        trace.Write(seq, "count-tokens-request.json", rawBody);
+        await ForwardAnthropicAsync(http, foundry.Anthropic, "messages/count_tokens", rawBody, trace, seq, logger, cancellationToken);
+    });
+
     app.MapPost("/v1/chat/completions", async (
+        HttpContext http,
         OpenAiChatRequest request,
+        FoundryClient foundry,
         ChatClient chatClient,
         DeploymentInfo info,
         ILogger<Program> logger,
         CancellationToken cancellationToken) =>
     {
+        // OpenAI-shaped clients can't be served by a native Anthropic deployment
+        // without a reverse bridge (not built — see PLAN.md); fail clearly.
+        if (await foundry.Api.ResolveAsync(cancellationToken) == FoundryApi.Anthropic)
+        {
+            return Results.Json(
+                new { error = new { message = "This Foundry deployment is a native Anthropic (Claude) deployment; /v1/chat/completions is not available. Use the Anthropic Messages endpoint (/v1/messages) or launch mode.", type = "invalid_request_error", code = (string?)null } },
+                statusCode: StatusCodes.Status501NotImplemented);
+        }
+
         try
         {
             var messages = request.Messages.Select(ToChatMessage).ToList();
@@ -189,6 +231,7 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
     // tools/tool_use/tool_result to Azure OpenAI function-calling in both directions.
     app.MapPost("/v1/messages", async (
         HttpContext http,
+        FoundryClient foundry,
         ChatClient chatClient,
         DeploymentInfo info,
         RequestTrace trace,
@@ -203,6 +246,31 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
 
         var seq = trace.Enabled ? trace.Next() : 0;
         trace.Write(seq, "anthropic-request.json", rawBody);
+
+        // Native Anthropic deployments (Claude on Foundry) take the passthrough path:
+        // same wire format on both sides, so no translation — including streaming.
+        FoundryApi api;
+        try
+        {
+            api = await foundry.Api.ResolveAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Foundry API detection failed");
+            http.Response.StatusCode = FoundryErrors.IsAuthFailure(ex)
+                ? StatusCodes.Status401Unauthorized
+                : StatusCodes.Status500InternalServerError;
+            await http.Response.WriteAsJsonAsync(
+                new { type = "error", error = new { type = FoundryErrors.IsAuthFailure(ex) ? "authentication_error" : "api_error", message = FoundryErrors.Describe(ex) } },
+                cancellationToken);
+            return;
+        }
+
+        if (api == FoundryApi.Anthropic)
+        {
+            await ForwardAnthropicAsync(http, foundry.Anthropic, "messages", rawBody, trace, seq, logger, cancellationToken);
+            return;
+        }
 
         AnthropicMessagesRequest? request;
         try
@@ -373,6 +441,72 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
     });
 
     return app;
+}
+
+// Byte-faithful forward to the native Anthropic surface on the Foundry resource.
+// Streaming responses (SSE) are relayed chunk-by-chunk — real incremental streaming.
+static async Task ForwardAnthropicAsync(
+    HttpContext http,
+    FoundryAnthropicClient anthropic,
+    string path,
+    string rawBody,
+    RequestTrace trace,
+    int seq,
+    ILogger logger,
+    CancellationToken cancellationToken)
+{
+    HttpResponseMessage upstream;
+    try
+    {
+        upstream = await anthropic.ForwardAsync(
+            rawBody,
+            path,
+            http.Request.Headers["anthropic-version"].FirstOrDefault(),
+            http.Request.Headers["anthropic-beta"].FirstOrDefault(),
+            cancellationToken);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Anthropic passthrough failed before reaching Foundry");
+        http.Response.StatusCode = FoundryErrors.IsAuthFailure(ex)
+            ? StatusCodes.Status401Unauthorized
+            : StatusCodes.Status500InternalServerError;
+        await http.Response.WriteAsJsonAsync(
+            new { type = "error", error = new { type = FoundryErrors.IsAuthFailure(ex) ? "authentication_error" : "api_error", message = FoundryErrors.Describe(ex) } },
+            cancellationToken);
+        return;
+    }
+
+    using (upstream)
+    {
+        http.Response.StatusCode = (int)upstream.StatusCode;
+        var contentType = upstream.Content.Headers.ContentType?.ToString() ?? "application/json";
+        http.Response.ContentType = contentType;
+
+        if (contentType.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase))
+        {
+            using var tee = trace.Enabled ? new MemoryStream() : null;
+            await using var source = await upstream.Content.ReadAsStreamAsync(cancellationToken);
+            var buffer = new byte[8192];
+            int read;
+            while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+            {
+                await http.Response.Body.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                await http.Response.Body.FlushAsync(cancellationToken);
+                tee?.Write(buffer, 0, read);
+            }
+            if (tee is not null)
+            {
+                trace.Write(seq, "anthropic-response.sse.txt", System.Text.Encoding.UTF8.GetString(tee.ToArray()));
+            }
+        }
+        else
+        {
+            var text = await upstream.Content.ReadAsStringAsync(cancellationToken);
+            trace.Write(seq, "anthropic-response.json", text);
+            await http.Response.WriteAsync(text, cancellationToken);
+        }
+    }
 }
 
 static async Task WriteSseAsync(HttpResponse response, string eventName, object data, CancellationToken cancellationToken)

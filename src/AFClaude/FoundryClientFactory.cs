@@ -5,13 +5,20 @@ using OpenAI.Chat;
 
 namespace AFClaude;
 
-internal sealed record FoundryClient(ChatClient ChatClient, string Deployment, TokenCredential Credential);
+internal sealed record FoundryClient(
+    ChatClient ChatClient,
+    FoundryAnthropicClient Anthropic,
+    FoundryApiResolver Api,
+    string Deployment,
+    TokenCredential Credential);
 
 internal static class FoundryClientFactory
 {
     // Azure OpenAI data-plane scope — used by the launch-mode token warm-up. The
     // AzureOpenAIClient pipeline requests the same scope internally.
     public const string TokenScope = "https://cognitiveservices.azure.com/.default";
+
+    private static readonly HttpClient SharedHttp = new();
 
     public static FoundryClient Create(IConfiguration configuration)
     {
@@ -32,6 +39,21 @@ internal static class FoundryClientFactory
                 "to the target deployment name.");
         }
 
+        // Foundry serves different model families on different API surfaces: GPT-family
+        // deployments on the Azure-OpenAI chat-completions route, Claude deployments on
+        // a native Anthropic Messages route. auto (default) probes once and prefers the
+        // native passthrough; the explicit values skip probing. The OpenAI path also
+        // stays available for future OpenAI-only hosts (e.g. Ollama).
+        var apiValue = configuration["Foundry:Api"];
+        FoundryApi? configuredApi = apiValue?.Trim().ToLowerInvariant() switch
+        {
+            null or "" or "auto" => null,
+            "anthropic" or "claude" => FoundryApi.Anthropic,
+            "openai" or "azure-openai" => FoundryApi.OpenAI,
+            _ => throw new InvalidOperationException(
+                $"Invalid configuration 'Foundry:Api' value '{apiValue}'. Use 'auto' (default), 'anthropic', or 'openai'."),
+        };
+
         // AzureCliCredential's default ProcessTimeout is 13s, but a cold `az` start can
         // take 14-24s on a loaded machine — which then surfaces as a bogus auth failure.
         var timeoutSeconds = configuration.GetValue<int?>("Foundry:CliTimeoutSeconds") ?? 60;
@@ -40,8 +62,16 @@ internal static class FoundryClientFactory
             ProcessTimeout = TimeSpan.FromSeconds(timeoutSeconds),
         }));
 
+        // Endpoint must end with a slash so relative paths append instead of replacing.
+        if (!endpoint.AbsoluteUri.EndsWith('/'))
+        {
+            endpoint = new Uri(endpoint.AbsoluteUri + "/");
+        }
+
         var azureClient = new AzureOpenAIClient(endpoint, credential);
-        return new FoundryClient(azureClient.GetChatClient(deployment), deployment, credential);
+        var anthropic = new FoundryAnthropicClient(SharedHttp, endpoint, deployment, credential);
+        var resolver = new FoundryApiResolver(configuredApi, anthropic.ProbeAsync);
+        return new FoundryClient(azureClient.GetChatClient(deployment), anthropic, resolver, deployment, credential);
     }
 }
 

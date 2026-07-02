@@ -2,8 +2,8 @@
 
 Origin: this plan captures and structures a design chat about wrapping an Azure AI
 Foundry model for local use from Claude via Microsoft Agent Framework, .NET 10, `dnx`,
-and `az`-based auth. Phases 1–8 are implemented and verified as described below (see
-each phase for exactly what "verified" means); Phase 9 is still ahead.
+and `az`-based auth. Phases 1–9 are implemented and verified as described below (see
+each phase for exactly what "verified" means); Phase 10 is still ahead.
 
 ## Open decisions
 
@@ -441,15 +441,59 @@ Moral for the record: "protocol-correct" (valid JSON, right schema, tools intact
 is not the same as "semantically faithful" — message-role translation shapes what
 the model attends to.
 
-## Phase 9 — Polish (remaining)
+## Phase 9 — Claude-on-Foundry native passthrough + API auto-detection — DONE
 
-- Real incremental streaming (both `/v1/chat/completions` and `/v1/messages`),
-  replacing `/v1/messages`'s coalesced-burst SSE approximation — deltas must
-  distinguish text vs. tool-call-in-progress now that tool_use blocks exist
+**Trigger (Framework, real org):** a `claude-sonnet-4-6` deployment was unreachable
+through AFClaude — the Azure-OpenAI route returned `404 api_not_supported`.
+Confirmed by direct calls bypassing AFClaude: **Claude models on Foundry are served
+on a native Anthropic Messages endpoint, `{endpoint}/anthropic/v1/messages`**,
+which 400s "anthropic-version: header is required" until that header is supplied,
+then answers with genuine Anthropic-shaped responses. A completely separate API
+surface from chat-completions.
+
+Implementation (user direction: prefer auto-detection with passthrough to the
+matched API; keep the OpenAI path for future OpenAI-only hosts like Ollama):
+
+- `Foundry__Api` = `auto` (default) | `anthropic` | `openai`. Auto probes once per
+  process — a 1-token request to the Anthropic route (2xx → Anthropic; 404/400 →
+  OpenAI; 401/403 **throws** so auth problems surface via `FoundryErrors` instead
+  of silently mis-detecting). Result cached; faulted probes retry on next request.
+- **Anthropic mode is a byte-faithful passthrough** (`FoundryAnthropicClient`):
+  `/v1/messages` forwards the raw body to `{endpoint}/anthropic/v1/messages` with
+  an Entra bearer token and `anthropic-version` (client's value forwarded, default
+  `2023-06-01`; `anthropic-beta` forwarded too). The only body mutation: `model`
+  is rewritten to the configured deployment (single-deployment proxy; Claude Code
+  sends its own aliases for background traffic). SSE streams relay chunk-by-chunk —
+  **real incremental streaming**, no coalescing. Upstream errors pass through
+  verbatim (already Anthropic-shaped). `/v1/messages/count_tokens` is proxied in
+  this mode (stays 404 in OpenAI mode as before). Trace mode captures both
+  directions (SSE teed to `*.sse.txt`).
+- OpenAI mode is unchanged (the Phase 7 bridge); `/v1/chat/completions` under an
+  Anthropic deployment returns a clear `501` pointing at `/v1/messages` (reverse
+  OpenAI→Anthropic translation deliberately not built).
+- MCP `ask_foundry` and `launch` are API-aware; `launch` logs which mode was
+  detected after the token warm-up.
+- Tests: 36 total (12 new — resolver caching/fault-retry/explicit-override,
+  forward URL/auth/version/beta headers, model rewrite, probe status mapping incl.
+  the 401/403-throws rule, Ask text extraction). Local E2E harness now runs BOTH
+  legs against the real `claude` CLI — the fake Foundry serves both surfaces, and
+  the anthropic leg runs with `Foundry__Api` unset to exercise real auto-detection:
+  both legs PASS (probe value round-tripped; passthrough leg streamed SSE).
+
+Still unverified against real Azure: the passthrough with a real Claude deployment
+(qhub-sweden `claude-sonnet-4-6`) — TESTING.md Stage 7.
+
+## Phase 10 — Polish (remaining)
+
+- Real incremental streaming for the **bridge** path (`/v1/chat/completions` and
+  OpenAI-mode `/v1/messages`) — the passthrough path already streams natively;
+  bridge deltas must distinguish text vs. tool-call-in-progress
 - Error surface parity across all three surfaces (HTTP OpenAI, HTTP Anthropic, MCP —
   same underlying failures, surface-appropriate presentation)
-- `/v1/messages/count_tokens` if real usage ever shows claude requiring it (not
-  observed in the Phase 8 runs)
+- Reverse bridge (OpenAI-shaped `/v1/chat/completions` → native Anthropic
+  deployment), if a real need appears
+- Other OpenAI-only hosts (e.g. Ollama) via `Foundry__Api=openai` + non-Azure
+  auth — needs an auth-mode option (the current path always uses `AzureCliCredential`)
 
 ## Explicitly out of scope for now
 

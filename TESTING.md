@@ -10,7 +10,7 @@ resources.
 > v0.2.1/v0.2.2 re-test — 6a/6b PASS, 6c FAIL differently: trace mode showed the
 > bridge mapping Claude Code's trailing `role:"system"` hook message to a final
 > *user* turn, burying the task (fixed in v0.2.3: system-role preserved in place;
-> PLAN.md Phase 8.2). **For a v0.2.3 re-test, only Stage 6c needs re-running.**
+> PLAN.md Phase 8.2). **For a v0.3.0 re-test, run Stage 7 (7a/7b/7c) — it supersedes the 6c re-run.**
 > The account needs the "Cognitive Services OpenAI User" role on the resource —
 > already granted on qhub-infra-resource during the first run.
 
@@ -59,7 +59,7 @@ PASS: `az account show` returns the expected org tenant; a deployment is identif
 
 ```powershell
 $env:Foundry__Endpoint = ""; $env:Foundry__Deployment = ""
-dnx AFClaude@0.2.3 -y
+dnx AFClaude@0.3.0 -y
 ```
 
 PASS: downloads from nuget.org (first run may take ~a minute) and exits with an
@@ -73,7 +73,7 @@ Start the proxy on a fixed port (background job), then hit it:
 
 ```powershell
 $env:ASPNETCORE_URLS = "http://127.0.0.1:31399"
-$proxy = Start-Job { dnx AFClaude@0.2.3 -y -- --http }
+$proxy = Start-Job { dnx AFClaude@0.3.0 -y -- --http }
 Start-Sleep -Seconds 20   # first run resolves the tool; check Receive-Job $proxy if unsure
 
 Invoke-RestMethod http://127.0.0.1:31399/v1/models | ConvertTo-Json -Depth 5
@@ -158,7 +158,7 @@ Stop the proxy: `Stop-Job $proxy; Remove-Job $proxy`.
 ## Stage 5 — MCP surface (`ask_foundry`)
 
 ```powershell
-claude mcp add afclaude --env Foundry__Endpoint=$env:Foundry__Endpoint --env Foundry__Deployment=$env:Foundry__Deployment -- dnx AFClaude@0.2.3 -y
+claude mcp add afclaude --env Foundry__Endpoint=$env:Foundry__Endpoint --env Foundry__Deployment=$env:Foundry__Deployment -- dnx AFClaude@0.3.0 -y
 claude -p "Use the ask_foundry tool to ask: 'Reply with exactly MCP OK'. Report the tool's response verbatim." --allowedTools "mcp__afclaude__ask_foundry"
 claude mcp remove afclaude   # cleanup
 ```
@@ -172,7 +172,7 @@ the tool reached Foundry). If `claude mcp add` syntax differs on this version,
 **6a — pipeline smoke (safe, non-interactive):**
 
 ```powershell
-dnx AFClaude@0.2.3 -y -- launch --version
+dnx AFClaude@0.3.0 -y -- launch --version
 ```
 
 PASS: prints `AFClaude proxy listening on http://127.0.0.1:31337 ...`, then the
@@ -181,7 +181,7 @@ claude version, exits 0. (Port busy? Set `$env:AFClaude__Launch__Port = "31401"`
 **6b — real text turn through claude (print mode, non-interactive):**
 
 ```powershell
-dnx AFClaude@0.2.3 -y -- launch -p "Reply with exactly: LAUNCH OK"
+dnx AFClaude@0.3.0 -y -- launch -p "Reply with exactly: LAUNCH OK"
 ```
 
 PASS: prints `LAUNCH OK`. **Known-unverified assumption being tested here:**
@@ -194,7 +194,7 @@ prompt):
 
 ```powershell
 Set-Content -Path "$env:TEMP\afclaude-probe.txt" -Value "PROBE-VALUE-12345"
-dnx AFClaude@0.2.3 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+dnx AFClaude@0.3.0 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
 ```
 
 PASS: prints `PROBE-VALUE-12345`. This is the end-to-end proof of Phase 7:
@@ -223,7 +223,7 @@ Re-run 6c with tracing enabled:
 
 ```powershell
 $env:AFClaude__TraceDir = "$env:TEMP\afclaude-trace"
-dnx AFClaude@0.2.3 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+dnx AFClaude@0.3.0 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
 ```
 
 Then inspect `$env:TEMP\afclaude-trace` — per request `NNN`:
@@ -238,6 +238,57 @@ Then inspect `$env:TEMP\afclaude-trace` — per request `NNN`:
 Report: attach (or summarise) the first exchange's four files, and state whether
 `tool_calls` ever appeared in any `azure-response.json`. Trace files contain the
 full conversation — treat the directory as sensitive and delete it afterwards.
+
+## Stage 7 — Claude-on-Foundry native passthrough (v0.3.0)
+
+Context: Claude deployments on Foundry (e.g. `claude-sonnet-4-6` on qhub-sweden)
+are served on `{endpoint}/anthropic/v1/messages`, not the Azure-OpenAI route
+(confirmed live: OpenAI route → `404 api_not_supported`; Anthropic route works
+with an `anthropic-version` header). v0.3.0 auto-detects this and proxies
+byte-faithfully — no translation, real streaming, `count_tokens` proxied.
+
+Point at the Claude deployment (endpoint/deployment from Stage 0 discovery
+against the resource that hosts it):
+
+```powershell
+$env:Foundry__Endpoint   = "https://<claude-resource-endpoint>/"
+$env:Foundry__Deployment = "claude-sonnet-4-6"
+# Foundry__Api unset -> auto-detection (or set "anthropic" to skip the probe)
+```
+
+**7a — direct Anthropic-shaped call through the proxy:**
+
+```powershell
+$env:ASPNETCORE_URLS = "http://127.0.0.1:31399"
+$proxy = Start-Job { dnx AFClaude@0.3.0 -y -- --http }
+Start-Sleep -Seconds 20
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:31399/v1/messages -ContentType 'application/json' -Body (@{
+  model = $env:Foundry__Deployment; max_tokens = 100
+  messages = @(@{ role = "user"; content = "Reply with exactly: SONNET OK" })
+} | ConvertTo-Json -Depth 5) | ConvertTo-Json -Depth 6
+Stop-Job $proxy; Remove-Job $proxy
+```
+
+PASS: a genuine Claude reply containing `SONNET OK` with a real `msg_...` id and
+non-zero usage. (First call includes the one-off 1-token detection probe.)
+
+**7b — Claude Code on a real Claude model (the goal of the whole project):**
+
+```powershell
+Set-Content -Path "$env:TEMP\afclaude-probe.txt" -Value "PROBE-VALUE-12345"
+dnx AFClaude@0.3.0 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+```
+
+PASS: stderr shows `Native Anthropic (Claude) deployment detected — /v1/messages
+runs as a direct passthrough.` after the token warm-up, and the output is
+`PROBE-VALUE-12345`. Record: detection line seen? Streaming felt incremental?
+Any `count_tokens` calls in a trace (now proxied rather than 404)?
+
+**7c — regression check on the GPT deployment (bridge path, v0.2.3 fix):** point
+`Foundry__Endpoint`/`Foundry__Deployment` back at gpt-4.1 (qhub-infra-resource)
+and repeat 7b. PASS: `OpenAI-compatible deployment — /v1/messages bridges ...`
+detection line, and `PROBE-VALUE-12345` printed (this validates the Phase 8.2
+trailing-system-role fix against the real model).
 
 ## Troubleshooting
 

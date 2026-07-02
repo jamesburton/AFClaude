@@ -45,6 +45,9 @@ jobs:
       - name: Build
         run: dotnet build -c Release --no-restore -p:Version=${{ steps.version.outputs.version }}
 
+      - name: Test
+        run: dotnet test -c Release --no-build -p:Version=${{ steps.version.outputs.version }}
+
       - name: Pack
         run: dotnet pack src/AFClaude/AFClaude.csproj -c Release --no-build -p:Version=${{ steps.version.outputs.version }} -o artifacts
 

@@ -2,8 +2,8 @@
 
 Origin: this plan captures and structures a design chat about wrapping an Azure AI
 Foundry model for local use from Claude via Microsoft Agent Framework, .NET 10, `dnx`,
-and `az`-based auth. Phases 1–6 are implemented and verified as described below (see
-each phase for exactly what "verified" means); Phase 7 is still ahead.
+and `az`-based auth. Phases 1–7 are implemented and verified as described below (see
+each phase for exactly what "verified" means); Phase 8 is still ahead.
 
 ## Open decisions
 
@@ -231,11 +231,8 @@ format-translation exists.
   surfaced to the user (full tool-use bridging vs. text-only vs. text-first) with no
   reply received in time; proceeded with the smallest working increment per the
   fallback default, consistent with how every other phase in this plan started
-  small and verified before extending. **Follow-up phase needed** before `claude`
-  is useful as an actual coding agent against Foundry: translate Anthropic
-  `tools`/`tool_use`/`tool_result` to/from Azure OpenAI function-calling, and
-  consider real incremental Azure streaming instead of the coalesced-burst
-  approximation.
+  small and verified before extending. **Follow-up done in Phase 7** (tool-use
+  bridging); real incremental Azure streaming remains (Phase 8).
 - `launch` subcommand (`Program.cs`): `dnx AFClaude -- launch [claude-args...]` —
   fail-fast config check (reusing `FoundryClientFactory.Create`) → starts the shared
   HTTP host bound to a fixed local port (`http://127.0.0.1:31337`, overridable via
@@ -258,13 +255,69 @@ format-translation exists.
   needs a real endpoint + `az login`, and (per the scope note above) will currently
   only work for plain chat, not tool-using turns.
 
-## Phase 7 — Polish (only once 1–6 work end to end)
+## Phase 7 — Tool-use bridging for `/v1/messages` — DONE
 
-- Tool-use bridging for `/v1/messages` (see Phase 6 follow-up) — the highest-value
-  remaining gap, since it's what makes `claude launch` useful as a coding agent
-  rather than a chatbot
-- Real incremental streaming (both `/v1/chat/completions` and `/v1/messages`), if
-  decided in scope, replacing `/v1/messages`'s coalesced-burst SSE approximation
+Closes the Phase 6 gap: `claude launch` was previously chat-only because
+`tools`/`tool_use`/`tool_result` were dropped in translation. The scope question
+(full bridging vs. text-only) was re-surfaced to the user at the start of this
+session with no reply; proceeded with the recommended full-bridging option per the
+same fallback rule as Phase 6.
+
+- `AnthropicMessages.cs` — extended into a full bidirectional bridge
+  (`AnthropicBridge`):
+  - Request: `tools` (name/description/`input_schema`) →
+    `ChatTool.CreateFunctionTool(...)`; built-in/server tool types without an
+    `input_schema` object (e.g. `web_search_20250305`) are skipped, since they have
+    no function-calling counterpart. `tool_choice` `auto`/`any`/`tool`/`none` →
+    `ChatToolChoice.CreateAutoChoice/CreateRequiredChoice/CreateFunctionChoice/
+    CreateNoneChoice`; `disable_parallel_tool_use` → `AllowParallelToolCalls`.
+    `max_tokens`/`temperature`/`top_p`/`stop_sequences` now also pass through via
+    `ChatCompletionOptions` (previously ignored).
+  - History: assistant `tool_use` blocks →
+    `ChatToolCall.CreateFunctionToolCall(id, name, input-JSON)` on an
+    `AssistantChatMessage` (text blocks ride along as a content part); user
+    `tool_result` blocks → standalone `ToolChatMessage(tool_use_id, text)` emitted
+    **before** any user text, because OpenAI requires tool-role messages to directly
+    follow the assistant message that made the calls (Anthropic instead nests results
+    inside the next user message). `thinking`/image/unknown blocks are dropped.
+  - Response: `ChatCompletion.ToolCalls` → Anthropic `tool_use` content blocks
+    (arguments parsed to a JSON `input` object; malformed arguments degrade to `{}`
+    rather than a 500); finish reason → `stop_reason` (`ToolCalls`/any-tool-call →
+    `tool_use`, `Length` → `max_tokens`, else `end_turn`). Real
+    `usage.input_tokens`/`output_tokens` from `ChatCompletion.Usage` (previously
+    hardcoded 0).
+  - Streaming: the coalesced SSE burst now emits one content block per output block —
+    text blocks as `text_delta`, tool_use blocks as `content_block_start` (id/name) +
+    `input_json_delta` (full arguments as one `partial_json`) — still not
+    incremental token-by-token streaming (see Phase 8).
+- API surface verified by reflecting the **resolved** `OpenAI` 2.10.0 assembly (the
+  one the `Azure.AI.OpenAI` 2.9.0-beta.1 pin actually loads) before writing code —
+  same discipline as decision 4, and how `functionSchemaIsStrict`,
+  `AssistantChatMessage(IEnumerable<ChatToolCall>)`, and
+  `OpenAIChatModelFactory.ChatCompletion(...)` were confirmed.
+- `tests/AFClaude.Tests` — new xUnit project (added to `AFClaude.slnx`,
+  `InternalsVisibleTo` from the main project; **not** packed). 13 tests cover both
+  directions of the bridge; the response direction uses
+  `OpenAIChatModelFactory.ChatCompletion(...)` test doubles (experimental API —
+  `OPENAI001` suppressed in the test project only), which is the only way to
+  exercise OpenAI→Anthropic translation without real Azure auth. `publish.yml`
+  gained a `dotnet test` step between Build and Pack, so publishing is now gated on
+  the suite.
+- Exit criteria — verified: all 13 unit tests pass (`dotnet test -c Release
+  --no-build`, exactly as CI runs it); live HTTP smoke test (PowerShell
+  `Start-Process` harness, fake endpoint) POSTed a full tool conversation — `tools`
+  array with one function tool + one built-in, `tool_choice`, assistant `tool_use`
+  history, user `tool_result` + text — to `/v1/messages` in both `stream: false`
+  and `stream: true` modes and got the clean Phase 5 `401 authentication_error` in
+  both, proving the entire request-side translation executes and fails only at the
+  real Azure auth boundary. **Still unverified (needs real `az login` + endpoint):**
+  a genuine tool-calling round trip where the model actually returns function calls.
+
+## Phase 8 — Polish (remaining)
+
+- Real incremental streaming (both `/v1/chat/completions` and `/v1/messages`),
+  replacing `/v1/messages`'s coalesced-burst SSE approximation — deltas must
+  distinguish text vs. tool-call-in-progress now that tool_use blocks exist
 - Error surface parity across all three surfaces (HTTP OpenAI, HTTP Anthropic, MCP —
   same underlying failures, surface-appropriate presentation)
 - Basic integration test hitting a real (or recorded) Foundry response
@@ -273,5 +326,3 @@ format-translation exists.
 
 - Multi-deployment / multi-model routing (single `Foundry:Deployment` only)
 - API-key auth path (Entra/`az` only, per the original ask)
-- Anthropic-shaped (`/v1/messages`) endpoint — only OpenAI-compatible HTTP shape and
-  native MCP tool calling are in scope

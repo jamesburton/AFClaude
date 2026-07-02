@@ -163,8 +163,8 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null)
     });
 
     // Anthropic Messages API-compatible endpoint — what Claude Code's ANTHROPIC_BASE_URL
-    // actually needs (it does not speak the OpenAI shape above). Chat-only for now: text
-    // content blocks are translated, tool_use/tool_result are not — see PLAN.md.
+    // actually needs (it does not speak the OpenAI shape above). Bridges Anthropic
+    // tools/tool_use/tool_result to Azure OpenAI function-calling in both directions.
     app.MapPost("/v1/messages", async (
         HttpContext http,
         AnthropicMessagesRequest request,
@@ -173,28 +173,13 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null)
         ILogger<Program> logger,
         CancellationToken cancellationToken) =>
     {
-        var messages = new List<ChatMessage>();
-        if (request.System.ValueKind is JsonValueKind.String or JsonValueKind.Array)
-        {
-            var systemText = AnthropicContent.ExtractText(request.System);
-            if (!string.IsNullOrEmpty(systemText))
-            {
-                messages.Add(new SystemChatMessage(systemText));
-            }
-        }
-
-        foreach (var m in request.Messages)
-        {
-            var text = AnthropicContent.ExtractText(m.Content);
-            messages.Add(string.Equals(m.Role, "assistant", StringComparison.OrdinalIgnoreCase)
-                ? new AssistantChatMessage(text)
-                : new UserChatMessage(text));
-        }
+        var messages = AnthropicBridge.ToChatMessages(request);
+        var options = AnthropicBridge.ToOptions(request);
 
         ChatCompletion completion;
         try
         {
-            completion = await chatClient.CompleteChatAsync(messages, cancellationToken: cancellationToken);
+            completion = await chatClient.CompleteChatAsync(messages, options, cancellationToken);
         }
         catch (Exception ex) when (FoundryErrors.IsAuthFailure(ex))
         {
@@ -215,7 +200,16 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null)
             return;
         }
 
-        var replyText = completion.Content.Count > 0 ? completion.Content[0].Text : string.Empty;
+        var blocks = AnthropicBridge.ToOutBlocks(completion);
+        if (blocks.Count == 0)
+        {
+            blocks.Add(new AnthropicTextBlock(string.Empty));
+        }
+
+        var stopReason = AnthropicBridge.MapStopReason(
+            completion.FinishReason, blocks.Any(b => b is AnthropicToolUseBlock));
+        var inputTokens = completion.Usage?.InputTokenCount ?? 0;
+        var outputTokens = completion.Usage?.OutputTokenCount ?? 0;
         var messageId = $"msg_{Guid.NewGuid():N}";
         var model = string.IsNullOrEmpty(request.Model) ? info.Deployment : request.Model;
 
@@ -236,31 +230,55 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null)
                     model,
                     stop_reason = (string?)null,
                     stop_sequence = (string?)null,
-                    usage = new { input_tokens = 0, output_tokens = 0 }
+                    usage = new { input_tokens = inputTokens, output_tokens = 0 }
                 }
             }, cancellationToken);
 
-            await WriteSseAsync(http.Response, "content_block_start", new
+            for (var i = 0; i < blocks.Count; i++)
             {
-                type = "content_block_start",
-                index = 0,
-                content_block = new { type = "text", text = "" }
-            }, cancellationToken);
+                switch (blocks[i])
+                {
+                    case AnthropicTextBlock text:
+                        await WriteSseAsync(http.Response, "content_block_start", new
+                        {
+                            type = "content_block_start",
+                            index = i,
+                            content_block = new { type = "text", text = "" }
+                        }, cancellationToken);
 
-            await WriteSseAsync(http.Response, "content_block_delta", new
-            {
-                type = "content_block_delta",
-                index = 0,
-                delta = new { type = "text_delta", text = replyText }
-            }, cancellationToken);
+                        await WriteSseAsync(http.Response, "content_block_delta", new
+                        {
+                            type = "content_block_delta",
+                            index = i,
+                            delta = new { type = "text_delta", text = text.Text }
+                        }, cancellationToken);
+                        break;
 
-            await WriteSseAsync(http.Response, "content_block_stop", new { type = "content_block_stop", index = 0 }, cancellationToken);
+                    case AnthropicToolUseBlock toolUse:
+                        await WriteSseAsync(http.Response, "content_block_start", new
+                        {
+                            type = "content_block_start",
+                            index = i,
+                            content_block = new { type = "tool_use", id = toolUse.Id, name = toolUse.Name, input = new { } }
+                        }, cancellationToken);
+
+                        await WriteSseAsync(http.Response, "content_block_delta", new
+                        {
+                            type = "content_block_delta",
+                            index = i,
+                            delta = new { type = "input_json_delta", partial_json = toolUse.ArgumentsJson }
+                        }, cancellationToken);
+                        break;
+                }
+
+                await WriteSseAsync(http.Response, "content_block_stop", new { type = "content_block_stop", index = i }, cancellationToken);
+            }
 
             await WriteSseAsync(http.Response, "message_delta", new
             {
                 type = "message_delta",
-                delta = new { stop_reason = "end_turn", stop_sequence = (string?)null },
-                usage = new { output_tokens = 0 }
+                delta = new { stop_reason = stopReason, stop_sequence = (string?)null },
+                usage = new { output_tokens = outputTokens }
             }, cancellationToken);
 
             await WriteSseAsync(http.Response, "message_stop", new { type = "message_stop" }, cancellationToken);
@@ -272,11 +290,11 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null)
             id = messageId,
             type = "message",
             role = "assistant",
-            content = new[] { new { type = "text", text = replyText } },
+            content = blocks.Select(AnthropicBridge.ToJson).ToArray(),
             model,
-            stop_reason = "end_turn",
+            stop_reason = stopReason,
             stop_sequence = (string?)null,
-            usage = new { input_tokens = 0, output_tokens = 0 }
+            usage = new { input_tokens = inputTokens, output_tokens = outputTokens }
         }, cancellationToken);
     });
 

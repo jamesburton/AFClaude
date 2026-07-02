@@ -13,8 +13,9 @@ It wraps the Foundry model with **Microsoft Agent Framework** (`ChatClientAgent`
 2. **`launch` mode** — starts an Anthropic Messages API-compatible endpoint
    (`POST /v1/messages`) and execs `claude` itself pointed at it via
    `ANTHROPIC_BASE_URL`, so Claude Code's *own* traffic runs against the Foundry
-   model. **Text-only for now — no tool use** (Read/Edit/Bash/etc. won't function);
-   see [Running claude against Foundry](#running-claude-against-foundry-launch).
+   model. Tool use (Read/Edit/Bash/etc.) is bridged to Azure OpenAI
+   function-calling; see
+   [Running claude against Foundry](#running-claude-against-foundry-launch).
 3. **OpenAI-compatible HTTP proxy** (`--http`) — `POST /v1/chat/completions` and
    `GET /v1/models`, for any other OpenAI-compatible client that wants to point at the
    same Foundry deployment over `http://127.0.0.1:<port>/v1`.
@@ -139,14 +140,19 @@ after `launch` are forwarded straight to `claude` — e.g.
 `dnx AFClaude -y -- launch --dangerously-skip-permissions`. When `claude` exits,
 AFClaude stops the proxy and exits with `claude`'s exit code.
 
-> **Current limitation: chat only, no tools.** The `/v1/messages` translation covers
-> plain text turns (including a `system` prompt) but does not yet translate
-> `tools`/`tool_use`/`tool_result` to Azure OpenAI function-calling. That means
-> Claude Code's actual coding-agent behavior — Read, Edit, Bash, and everything else
-> it does via tool calls — **will not work** in this mode yet; it's usable as a plain
-> chat interface against the Foundry model only. Tool-use bridging is planned as a
-> follow-up — see [PLAN.md](PLAN.md) Phase 6/7. Streaming responses are also a
-> single coalesced burst rather than true incremental token streaming.
+The `/v1/messages` translation bridges Anthropic tool calling to Azure OpenAI
+function-calling in both directions: the `tools` array becomes function-tool
+definitions, `tool_use`/`tool_result` history becomes assistant tool calls and
+tool-role messages, and the model's function calls come back as `tool_use` content
+blocks with `stop_reason: "tool_use"` — so Claude Code's coding-agent behavior
+(Read, Edit, Bash, ...) works in this mode. `max_tokens`, `temperature`, `top_p`,
+and `stop_sequences` pass through as well.
+
+> **Current limitations.** Anthropic built-in *server* tools (e.g. web search) have
+> no function-calling counterpart and are skipped, and non-text content blocks
+> (images, thinking) are dropped. Streaming responses are a single coalesced SSE
+> burst rather than true incremental token streaming — the reply arrives all at
+> once. The deployed model must also support function calling on the Azure side. See [PLAN.md](PLAN.md) Phase 8 for what's left.
 
 ### Other OpenAI-compatible clients (HTTP proxy, secondary)
 
@@ -180,11 +186,12 @@ matching GitHub Environment and the `NUGET_USER` repo secret the workflow needs.
 
 ## Status
 
-Phases 1–6 done and verified: scaffold, HTTP proxy, MCP stdio server, `dnx` packaging,
+Phases 1–7 done and verified: scaffold, HTTP proxy, MCP stdio server, `dnx` packaging,
 a **live** NuGet Trusted Publishing pipeline (`AFClaude` is published on nuget.org,
 `dnx AFClaude -y` confirmed pulling the real published build), clean auth-error
-surfaces in both HTTP and MCP modes, and the `/v1/messages` + `launch` path (verified
-via `claude --version` end to end, not yet with a real interactive session against a
-real Foundry deployment). The main gap: `launch` mode is **chat-only** — no tool-use
-bridging yet, so `claude launch` can't actually use its tools. See
-[PLAN.md](PLAN.md) Phase 7 for what's left.
+surfaces in both HTTP and MCP modes, the `/v1/messages` + `launch` path (verified
+via `claude --version` end to end), and full tool-use bridging for `/v1/messages`
+(unit-tested in both directions; request side smoke-tested live up to the Azure auth
+boundary). Still unverified: any round trip against a **real** Foundry deployment —
+everything so far runs against fake endpoints without `az login`. See
+[PLAN.md](PLAN.md) Phase 8 for what's left.

@@ -302,6 +302,15 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
             trace.WriteAzureRequest(seq, messages, options);
         }
 
+        var messageId = $"msg_{Guid.NewGuid():N}";
+        var model = string.IsNullOrEmpty(request.Model) ? info.Deployment : request.Model;
+
+        if (request.Stream)
+        {
+            await StreamBridgeAsync(http, chatClient, messages, options, messageId, model, trace, seq, logger, cancellationToken);
+            return;
+        }
+
         ChatCompletion completion;
         try
         {
@@ -341,90 +350,16 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
             completion.FinishReason, blocks.Any(b => b is AnthropicToolUseBlock));
         var inputTokens = completion.Usage?.InputTokenCount ?? 0;
         var outputTokens = completion.Usage?.OutputTokenCount ?? 0;
-        var messageId = $"msg_{Guid.NewGuid():N}";
-        var model = string.IsNullOrEmpty(request.Model) ? info.Deployment : request.Model;
 
         if (trace.Enabled)
         {
             trace.WriteJson(seq, "anthropic-response.json", new
             {
-                stream = request.Stream,
+                stream = false,
                 stop_reason = stopReason,
                 content = blocks.Select(AnthropicBridge.ToJson).ToArray(),
                 usage = new { input_tokens = inputTokens, output_tokens = outputTokens },
             });
-        }
-
-        if (request.Stream)
-        {
-            http.Response.ContentType = "text/event-stream";
-            http.Response.Headers.CacheControl = "no-cache";
-
-            await WriteSseAsync(http.Response, "message_start", new
-            {
-                type = "message_start",
-                message = new
-                {
-                    id = messageId,
-                    type = "message",
-                    role = "assistant",
-                    content = Array.Empty<object>(),
-                    model,
-                    stop_reason = (string?)null,
-                    stop_sequence = (string?)null,
-                    usage = new { input_tokens = inputTokens, output_tokens = 0 }
-                }
-            }, cancellationToken);
-
-            for (var i = 0; i < blocks.Count; i++)
-            {
-                switch (blocks[i])
-                {
-                    case AnthropicTextBlock text:
-                        await WriteSseAsync(http.Response, "content_block_start", new
-                        {
-                            type = "content_block_start",
-                            index = i,
-                            content_block = new { type = "text", text = "" }
-                        }, cancellationToken);
-
-                        await WriteSseAsync(http.Response, "content_block_delta", new
-                        {
-                            type = "content_block_delta",
-                            index = i,
-                            delta = new { type = "text_delta", text = text.Text }
-                        }, cancellationToken);
-                        break;
-
-                    case AnthropicToolUseBlock toolUse:
-                        await WriteSseAsync(http.Response, "content_block_start", new
-                        {
-                            type = "content_block_start",
-                            index = i,
-                            content_block = new { type = "tool_use", id = toolUse.Id, name = toolUse.Name, input = new { } }
-                        }, cancellationToken);
-
-                        await WriteSseAsync(http.Response, "content_block_delta", new
-                        {
-                            type = "content_block_delta",
-                            index = i,
-                            delta = new { type = "input_json_delta", partial_json = toolUse.ArgumentsJson }
-                        }, cancellationToken);
-                        break;
-                }
-
-                await WriteSseAsync(http.Response, "content_block_stop", new { type = "content_block_stop", index = i }, cancellationToken);
-            }
-
-            await WriteSseAsync(http.Response, "message_delta", new
-            {
-                type = "message_delta",
-                delta = new { stop_reason = stopReason, stop_sequence = (string?)null },
-                usage = new { output_tokens = outputTokens }
-            }, cancellationToken);
-
-            await WriteSseAsync(http.Response, "message_stop", new { type = "message_stop" }, cancellationToken);
-            return;
         }
 
         await http.Response.WriteAsJsonAsync(new
@@ -441,6 +376,89 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
     });
 
     return app;
+}
+
+// Real incremental streaming for the bridge path: Azure's streaming chat completion
+// is translated update-by-update into Anthropic SSE. Errors before the first update
+// return a normal classified JSON error; mid-stream failures emit an Anthropic
+// `error` event (headers are already sent by then).
+static async Task StreamBridgeAsync(
+    HttpContext http,
+    ChatClient chatClient,
+    List<ChatMessage> messages,
+    ChatCompletionOptions options,
+    string messageId,
+    string model,
+    RequestTrace trace,
+    int seq,
+    ILogger logger,
+    CancellationToken cancellationToken)
+{
+    var translator = new AnthropicStreamTranslator(messageId, model);
+    var traceSse = trace.Enabled ? new System.Text.StringBuilder() : null;
+    var started = false;
+
+    async Task EmitAsync(AnthropicStreamTranslator.SseEvent e)
+    {
+        var frame = $"event: {e.Name}\ndata: {JsonSerializer.Serialize(e.Payload)}\n\n";
+        traceSse?.Append(frame);
+        await http.Response.WriteAsync(frame, cancellationToken);
+        await http.Response.Body.FlushAsync(cancellationToken);
+    }
+
+    async Task StartAsync()
+    {
+        started = true;
+        http.Response.ContentType = "text/event-stream";
+        http.Response.Headers.CacheControl = "no-cache";
+        await EmitAsync(translator.Start());
+    }
+
+    try
+    {
+        await foreach (var update in chatClient.CompleteChatStreamingAsync(messages, options, cancellationToken))
+        {
+            if (!started)
+            {
+                await StartAsync();
+            }
+            foreach (var e in translator.Translate(update))
+            {
+                await EmitAsync(e);
+            }
+        }
+
+        if (!started)
+        {
+            await StartAsync();
+        }
+        foreach (var e in translator.Finish())
+        {
+            await EmitAsync(e);
+        }
+    }
+    catch (Exception ex) when (!started)
+    {
+        logger.LogError(ex, "Streaming bridge completion failed before any output");
+        http.Response.StatusCode = FoundryErrors.IsAuthFailure(ex)
+            ? StatusCodes.Status401Unauthorized
+            : StatusCodes.Status500InternalServerError;
+        await http.Response.WriteAsJsonAsync(
+            new { type = "error", error = new { type = FoundryErrors.IsAuthFailure(ex) ? "authentication_error" : "api_error", message = FoundryErrors.Describe(ex) } },
+            cancellationToken);
+        return;
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Streaming bridge failed mid-stream");
+        await EmitAsync(new AnthropicStreamTranslator.SseEvent("error",
+            new { type = "error", error = new { type = "api_error", message = FoundryErrors.Describe(ex) } }));
+    }
+
+    if (traceSse is not null)
+    {
+        trace.Write(seq, "anthropic-response.sse.txt", traceSse.ToString());
+    }
 }
 
 // Byte-faithful forward to the native Anthropic surface on the Foundry resource.
@@ -517,13 +535,6 @@ static async Task ForwardAnthropicAsync(
             await http.Response.WriteAsync(text, cancellationToken);
         }
     }
-}
-
-static async Task WriteSseAsync(HttpResponse response, string eventName, object data, CancellationToken cancellationToken)
-{
-    await response.WriteAsync($"event: {eventName}\n", cancellationToken);
-    await response.WriteAsync($"data: {JsonSerializer.Serialize(data)}\n\n", cancellationToken);
-    await response.Body.FlushAsync(cancellationToken);
 }
 
 static ChatMessage ToChatMessage(OpenAiMessage message) => message.Role switch

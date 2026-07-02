@@ -43,9 +43,12 @@ async Task Handle(HttpContext http)
 
     object message;
     string finish;
+    string? textReply = null;
+    var isToolCall = false;
     if (lastToolContent is not null)
     {
-        message = new { role = "assistant", content = $"TOOL RESULT RECEIVED >>>{lastToolContent}<<<" };
+        textReply = $"TOOL RESULT RECEIVED >>>{lastToolContent}<<<";
+        message = new { role = "assistant", content = textReply };
         finish = "stop";
     }
     else if (body.Contains(probeMarker)
@@ -53,6 +56,7 @@ async Task Handle(HttpContext http)
         && tools.ValueKind == JsonValueKind.Array
         && tools.GetArrayLength() > 0)
     {
+        isToolCall = true;
         message = new
         {
             role = "assistant",
@@ -71,21 +75,82 @@ async Task Handle(HttpContext http)
     }
     else
     {
-        message = new { role = "assistant", content = "OK" };
+        textReply = "OK";
+        message = new { role = "assistant", content = textReply };
         finish = "stop";
     }
 
-    var resp = new
+    var wantsStream = doc.RootElement.TryGetProperty("stream", out var streamProp)
+        && streamProp.ValueKind == JsonValueKind.True;
+
+    if (!wantsStream)
     {
-        id = $"chatcmpl-fake-{n}",
-        @object = "chat.completion",
-        created = 1700000000,
-        model = "gpt-fake",
-        choices = new object[] { new { index = 0, finish_reason = finish, message } },
-        usage = new { prompt_tokens = 42, completion_tokens = 7, total_tokens = 49 }
-    };
-    File.WriteAllText(Path.Combine(logDir, $"{n:D3}-response.json"), JsonSerializer.Serialize(resp));
-    await http.Response.WriteAsJsonAsync(resp);
+        var resp = new
+        {
+            id = $"chatcmpl-fake-{n}",
+            @object = "chat.completion",
+            created = 1700000000,
+            model = "gpt-fake",
+            choices = new object[] { new { index = 0, finish_reason = finish, message } },
+            usage = new { prompt_tokens = 42, completion_tokens = 7, total_tokens = 49 }
+        };
+        File.WriteAllText(Path.Combine(logDir, $"{n:D3}-response.json"), JsonSerializer.Serialize(resp));
+        await http.Response.WriteAsJsonAsync(resp);
+        return;
+    }
+
+    // Genuine chat.completion.chunk SSE, split across multiple frames so the bridge's
+    // incremental translation is actually exercised.
+    http.Response.ContentType = "text/event-stream";
+    async Task Chunk(object delta, string? finishReason = null, object? usage = null)
+    {
+        var chunk = new
+        {
+            id = $"chatcmpl-fake-{n}",
+            @object = "chat.completion.chunk",
+            created = 1700000000,
+            model = "gpt-fake",
+            choices = new object[] { new { index = 0, delta, finish_reason = finishReason } },
+            usage,
+        };
+        await http.Response.WriteAsync($"data: {JsonSerializer.Serialize(chunk)}\n\n");
+        await http.Response.Body.FlushAsync();
+    }
+
+    if (isToolCall)
+    {
+        var arguments = JsonSerializer.Serialize(new { file_path = probePath });
+        var half = arguments.Length / 2;
+        await Chunk(new
+        {
+            role = "assistant",
+            tool_calls = new object[]
+            {
+                new { index = 0, id = "call_fake_read_1", type = "function", function = new { name = "Read", arguments = arguments[..half] } }
+            }
+        });
+        await Chunk(new
+        {
+            tool_calls = new object[]
+            {
+                new { index = 0, function = new { arguments = arguments[half..] } }
+            }
+        });
+    }
+    else
+    {
+        var half = Math.Max(1, textReply!.Length / 2);
+        await Chunk(new { role = "assistant", content = textReply[..half] });
+        if (textReply.Length > half)
+        {
+            await Chunk(new { content = textReply[half..] });
+        }
+    }
+
+    await Chunk(new { }, finish, new { prompt_tokens = 42, completion_tokens = 7, total_tokens = 49 });
+    await http.Response.WriteAsync("data: [DONE]\n\n");
+    await http.Response.Body.FlushAsync();
+    File.WriteAllText(Path.Combine(logDir, $"{n:D3}-response.txt"), $"SSE finish={finish}");
 }
 
 app.MapPost("/openai/deployments/{dep}/chat/completions", Handle);

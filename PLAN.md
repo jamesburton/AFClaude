@@ -2,8 +2,8 @@
 
 Origin: this plan captures and structures a design chat about wrapping an Azure AI
 Foundry model for local use from Claude via Microsoft Agent Framework, .NET 10, `dnx`,
-and `az`-based auth. Phases 1–9 are implemented and verified as described below (see
-each phase for exactly what "verified" means); Phase 10 is still ahead.
+and `az`-based auth. Phases 1–10 are implemented and verified as described below (see
+each phase for exactly what "verified" means); Phase 11 is still ahead.
 
 ## Open decisions
 
@@ -538,13 +538,40 @@ permission gate silently denies out-of-scope reads in `-p` mode (no prompt
 possible), which looks like a proxy failure but isn't. TESTING.md commands now
 use working-directory paths.
 
-## Phase 10 — Polish (remaining)
+## Phase 10 — Bridge-path incremental streaming — DONE
 
-- Real incremental streaming for the **bridge** path (`/v1/chat/completions` and
-  OpenAI-mode `/v1/messages`) — the passthrough path already streams natively;
-  bridge deltas must distinguish text vs. tool-call-in-progress
+OpenAI-mode `/v1/messages` with `stream: true` now uses
+`CompleteChatStreamingAsync` and translates update-by-update instead of the old
+coalesced burst (`AnthropicStreamTranslator`, `src/AFClaude/AnthropicStreaming.cs`):
+
+- One Anthropic content block open at a time: text deltas stream as `text_delta`;
+  each OpenAI tool-call index opens a `tool_use` block (id/name arrive on that
+  index's first fragment) whose argument bytes stream as `input_json_delta`.
+  Sequential Anthropic block indices; a block closes when the next one opens.
+- `message_start` is only emitted once the first upstream update arrives, so
+  failures before any output return the normal classified JSON error (401/500);
+  mid-stream failures emit an Anthropic `error` SSE event (headers already sent).
+- Usage comes from the final update's usage chunk; empty completions still emit
+  one empty text block. Trace mode captures the emitted SSE
+  (`anthropic-response.sse.txt`).
+- Verified: 4 translator unit tests (47 total) built on
+  `OpenAIChatModelFactory.StreamingChatCompletionUpdate/StreamingChatToolCallUpdate`
+  test doubles, plus the E2E — the fake Foundry's OpenAI route now serves genuine
+  `chat.completion.chunk` SSE with arguments/text split across frames, and the
+  openai leg passes with the real `claude` CLI parsing the incrementally
+  translated stream. The trace shows multiple `content_block_delta` frames per
+  block — real streaming, not a burst.
+
+Not in scope here: SSE on the OpenAI-shaped `/v1/chat/completions` surface itself
+(its `stream` flag is still ignored — Phase 11).
+
+## Phase 11 — Polish (remaining)
+
 - Error surface parity across all three surfaces (HTTP OpenAI, HTTP Anthropic, MCP —
-  same underlying failures, surface-appropriate presentation)
+  same underlying failures, surface-appropriate presentation; propagate upstream
+  4xx statuses like 429 instead of blanket 500s)
+- SSE streaming for the OpenAI-shaped `/v1/chat/completions` surface (its `stream`
+  flag is currently ignored)
 - Reverse bridge (OpenAI-shaped `/v1/chat/completions` → native Anthropic
   deployment), if a real need appears
 - Other OpenAI-only hosts (e.g. Ollama) via `Foundry__Api=openai` + non-Azure

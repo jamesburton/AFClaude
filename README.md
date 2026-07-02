@@ -182,9 +182,9 @@ with `stop_reason: "tool_use"`. `max_tokens`, `temperature`, `top_p`, and
 
 > **Bridge-mode limitations** (OpenAI-compatible deployments only — none of this
 > applies to the native Claude passthrough). Anthropic built-in *server* tools
-> (e.g. web search) have no function-calling counterpart and are skipped; non-text
-> content blocks (images, thinking) are dropped; streaming responses are a single
-> coalesced SSE burst rather than true incremental token streaming.
+> (e.g. web search) have no function-calling counterpart and are skipped, and
+> non-text content blocks (images, thinking) are dropped. Streaming is real and
+> incremental on both paths as of v0.4.0.
 >
 > **In bridge mode, the deployed model decides how useful launch mode is.** Both
 > paths are verified end-to-end against the real `claude` client

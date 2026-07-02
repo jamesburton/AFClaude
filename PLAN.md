@@ -155,12 +155,14 @@ the actual finding; the rest still need a decision before the phase that touches
      owns the trusted publishing policy — passed as `NuGet/login@v1`'s `user` input.
   4. If the repo is private, note the policy starts in a temporary 7-day-active state
      until the first successful publish; irrelevant once the repo is public.
-- Exit criteria (pipeline correctness): verified — `dotnet pack` succeeds locally
-  with the real metadata, and `publish.yml` parses as valid YAML with `id-token:
-  write` present. **Not yet verified: an actual end-to-end tag-triggered publish**,
-  since that requires the nuget.org-side policy above to exist first.
-- Separately, `dnx`-based zero-install launch (`dnx AFClaude -y`) is still to be
-  smoke-tested once a real version is published — see Phase 6.
+- Exit criteria — fully verified end to end: pushed `main` + tag `v0.1.0`, the
+  `publish.yml` workflow ran (build → pack → `NuGet/login@v1` OIDC exchange →
+  `dotnet nuget push`) and succeeded; `AFClaude 0.1.0` is live on
+  `api.nuget.org/v3-flatcontainer/afclaude/index.json`. `dnx AFClaude -y` on a clean
+  shell (no local build, no local NuGet cache entry for this package) downloaded and
+  ran the real published binary and correctly threw the Phase 1 fail-fast
+  `InvalidOperationException` on missing config — the stack trace's `/home/runner/...`
+  paths confirm it's the GitHub Actions build artifact, not anything local.
 
 ## Phase 5 — Auth hardening — DONE
 

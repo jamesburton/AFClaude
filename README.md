@@ -69,6 +69,7 @@ Set via environment variables (or `appsettings.json` / `dotnet user-secrets` loc
 | `Foundry__Endpoint`   | `https://<resource>.cognitiveservices.azure.com/`  | Use whatever `az cognitiveservices account list` reports as `properties.endpoint`. The `.cognitiveservices.azure.com` shape is verified live against a real AIServices/Foundry resource; `.openai.azure.com` resource endpoints should work identically. |
 | `Foundry__Deployment` | `gpt-4o-mini`                                       | Deployment name, not the base model name. |
 | `Foundry__CliTimeoutSeconds` | `60` (default)                              | How long to wait for the `az` CLI to produce a token. The Azure SDK default (13s) is too short for a cold `az` start on slow or loaded machines (14–24s observed) — AFClaude defaults to 60; raise it if you still see token-timeout errors. |
+| `AFClaude__TraceDir`  | *(unset)*                                          | Opt-in wire tracing for `/v1/messages`: dumps each request's raw Anthropic body, translated Azure request, Azure response, and the reply to numbered files in this directory. For diagnosing translation/model issues. **Traces contain full conversation content** — use a private directory and delete afterwards. |
 
 No API keys are configured — auth is entirely via `AzureCliCredential` (falls back to
 other `DefaultAzureCredential` sources if you later want that instead).
@@ -158,7 +159,15 @@ and `stop_sequences` pass through as well.
 > no function-calling counterpart and are skipped, and non-text content blocks
 > (images, thinking) are dropped. Streaming responses are a single coalesced SSE
 > burst rather than true incremental token streaming — the reply arrives all at
-> once. The deployed model must also support function calling on the Azure side. See [PLAN.md](PLAN.md) Phase 8 for what's left.
+> once.
+>
+> **The deployed model decides how useful this mode is.** The bridge is verified
+> protocol-correct end-to-end against the real `claude` client
+> (`tools/local-e2e/run-e2e.ps1`), but Claude Code's prompts are tuned for Claude —
+> a non-Claude model may answer in plain text (or fabricate output) instead of
+> calling tools, which looks like "it read the file" while it never did. If tool
+> turns behave oddly, set `AFClaude__TraceDir` and check whether the model's
+> responses actually contain `tool_calls` (see TESTING.md, "Stage 6c diagnosis"). See [PLAN.md](PLAN.md) Phase 8 for what's left.
 
 ### Other OpenAI-compatible clients (HTTP proxy, secondary)
 

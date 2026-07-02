@@ -364,6 +364,54 @@ return 200, and `/v1/messages` still returns the classified 401. **Stage 6c
 fix directly targets its failure mode but hasn't been re-tested against the real
 org yet.
 
+## Phase 8.1 — Stage 6c investigation: bridge exonerated, trace mode — DONE
+
+The v0.2.1 Framework re-run fixed the auth timeout (6a/6b PASS, token pre-warm cut
+6b from 18s to 5.5s) but 6c failed **differently**: HTTP 200 everywhere, exit 0,
+and plausible-but-wrong output — three distinct fabrications across three runs,
+the probe file never actually read. Silent wrongness, worse than the loud 401 it
+replaced.
+
+**Local reproduction harness** (`tools/local-e2e/`, reusable regression): drives
+the REAL `claude` CLI through `launch` against a fully fake stack — `fake-az/az.cmd`
+(stub `az` returning a fake token; AzureCliCredential happily parses it) + a fake
+Azure OpenAI endpoint on the trusted ASP.NET dev cert (HTTPS is required — the
+SDK's bearer policy refuses plain HTTP) that scripts a `Read` function call and
+then echoes the tool result. Run via `tools/local-e2e/run-e2e.ps1`.
+
+**Result: E2E PASS.** claude's genuine 119KB request (31 tools, `stream: true`,
+`max_tokens` 32000) translated correctly — all 31 tools forwarded, the scripted
+`tool_calls` response became a `tool_use` SSE block that real claude parsed and
+executed, the `tool_result` history round-tripped, and the probe file's contents
+appeared in the final answer. **The bridge is protocol-correct against the real
+client; the Framework 6c failure is model behaviour** — gpt-4.1, driven by Claude
+Code's Claude-tuned prompt (plus that machine's plugin/skill injections), answers
+in text instead of emitting function calls, at temperature 1, non-deterministically.
+Nothing bridge-side can force a model to call tools without breaking normal turns.
+
+Shipped alongside the harness (v0.2.2):
+
+- **Wire-level trace mode** — `AFClaude__TraceDir=<dir>` dumps, per `/v1/messages`
+  call: the raw Anthropic request, the translated Azure request (real wire format
+  via `ModelReaderWriter`), Azure's response, and our reply. This is how a future
+  "tool use behaves oddly" report gets diagnosed from evidence (does
+  `azure-response.json` contain `tool_calls`?) instead of symptoms. Tracing
+  failures can never break a request. TESTING.md gained a "Stage 6c diagnosis"
+  section built on it.
+- `/v1/messages` now reads its body manually: malformed JSON returns a proper
+  Anthropic-shaped `400 invalid_request_error` (previously the framework's default
+  binding failure), and the raw body is available to tracing.
+- Fixed a latent config bug: the documented `AFClaude__Launch__Port` override was
+  never read (code looked only at `Launch__Port`); both now work.
+- Harness gotcha worth remembering: a minimal-API handler with signature
+  `Func<HttpContext, Task<IResult>>` is treated as a plain `RequestDelegate` — the
+  returned `IResult` is silently never executed (200, empty body). Write the
+  response explicitly in such handlers.
+
+Follow-up options if launch mode against non-Claude models matters (not started):
+try deployments with stronger agentic function-calling behaviour, and capture a
+real traced exchange from an affected machine to confirm the model-side diagnosis.
+
 ## Phase 9 — Polish (remaining)
 
 - Real incremental streaming (both `/v1/chat/completions` and `/v1/messages`),

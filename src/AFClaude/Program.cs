@@ -56,7 +56,8 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     var foundry = FoundryClientFactory.Create(config); // fail fast before starting anything
     var deployment = foundry.Deployment;
 
-    var port = config.GetValue<int?>("Launch:Port") ?? 31337;
+    // Both spellings: AFClaude__Launch__Port (documented) and Launch__Port.
+    var port = config.GetValue<int?>("AFClaude:Launch:Port") ?? config.GetValue<int?>("Launch:Port") ?? 31337;
     var baseUrl = $"http://127.0.0.1:{port}";
 
     var app = BuildHttpApp([], baseUrl, foundry);
@@ -117,6 +118,7 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
     foundry ??= FoundryClientFactory.Create(builder.Configuration);
     builder.Services.AddSingleton(foundry.ChatClient);
     builder.Services.AddSingleton(new DeploymentInfo(foundry.Deployment));
+    builder.Services.AddSingleton(new RequestTrace(builder.Configuration["AFClaude:TraceDir"]));
 
     var app = builder.Build();
 
@@ -187,14 +189,50 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
     // tools/tool_use/tool_result to Azure OpenAI function-calling in both directions.
     app.MapPost("/v1/messages", async (
         HttpContext http,
-        AnthropicMessagesRequest request,
         ChatClient chatClient,
         DeploymentInfo info,
+        RequestTrace trace,
         ILogger<Program> logger,
         CancellationToken cancellationToken) =>
     {
+        string rawBody;
+        using (var reader = new StreamReader(http.Request.Body))
+        {
+            rawBody = await reader.ReadToEndAsync(cancellationToken);
+        }
+
+        var seq = trace.Enabled ? trace.Next() : 0;
+        trace.Write(seq, "anthropic-request.json", rawBody);
+
+        AnthropicMessagesRequest? request;
+        try
+        {
+            request = JsonSerializer.Deserialize<AnthropicMessagesRequest>(rawBody, JsonSerializerOptions.Web);
+        }
+        catch (JsonException ex)
+        {
+            logger.LogError(ex, "Unparseable /v1/messages body");
+            http.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await http.Response.WriteAsJsonAsync(
+                new { type = "error", error = new { type = "invalid_request_error", message = "Request body is not a valid Anthropic Messages request." } },
+                cancellationToken);
+            return;
+        }
+        if (request?.Messages is null)
+        {
+            http.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await http.Response.WriteAsJsonAsync(
+                new { type = "error", error = new { type = "invalid_request_error", message = "Request must include a messages array." } },
+                cancellationToken);
+            return;
+        }
+
         var messages = AnthropicBridge.ToChatMessages(request);
         var options = AnthropicBridge.ToOptions(request);
+        if (trace.Enabled)
+        {
+            trace.WriteAzureRequest(seq, messages, options);
+        }
 
         ChatCompletion completion;
         try
@@ -220,6 +258,11 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
             return;
         }
 
+        if (trace.Enabled)
+        {
+            trace.WriteAzureResponse(seq, completion);
+        }
+
         var blocks = AnthropicBridge.ToOutBlocks(completion);
         if (blocks.Count == 0)
         {
@@ -232,6 +275,17 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
         var outputTokens = completion.Usage?.OutputTokenCount ?? 0;
         var messageId = $"msg_{Guid.NewGuid():N}";
         var model = string.IsNullOrEmpty(request.Model) ? info.Deployment : request.Model;
+
+        if (trace.Enabled)
+        {
+            trace.WriteJson(seq, "anthropic-response.json", new
+            {
+                stream = request.Stream,
+                stop_reason = stopReason,
+                content = blocks.Select(AnthropicBridge.ToJson).ToArray(),
+                usage = new { input_tokens = inputTokens, output_tokens = outputTokens },
+            });
+        }
 
         if (request.Stream)
         {

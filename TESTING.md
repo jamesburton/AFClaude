@@ -204,6 +204,38 @@ If 6b/6c fail with errors mentioning **`count_tokens`** or a 404 on
 `/v1/messages/count_tokens`: that endpoint is not implemented (known gap) —
 record it; it means Claude Code requires it and it must be added.
 
+## Stage 6c diagnosis — trace mode (v0.2.2+)
+
+Context: the v0.2.1 Stage 6c failure mode (HTTP 200, plausible-but-wrong text,
+file never read) was investigated with a local end-to-end harness
+(`tools/local-e2e/run-e2e.ps1` — real `claude` CLI, fake `az`, fake Azure model
+scripting a Read tool call). **The bridge passed cleanly**: claude's real 119KB
+request with 31 tools translated correctly, the tool_use block was parsed and
+executed by claude, and the tool_result round-tripped into the final answer. So
+wrong-content failures against a real deployment indicate the **model** is not
+emitting tool calls (Claude Code's prompts are Claude-tuned), not a proxy defect.
+Trace mode produces the evidence either way.
+
+Re-run 6c with tracing enabled:
+
+```powershell
+$env:AFClaude__TraceDir = "$env:TEMP\afclaude-trace"
+dnx AFClaude@0.2.2 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+```
+
+Then inspect `$env:TEMP\afclaude-trace` — per request `NNN`:
+
+| File | What to check |
+|---|---|
+| `NNN-anthropic-request.json` | claude's raw request — `tools` array present? |
+| `NNN-azure-request.json` | the translated request — `tools` should list Read/Bash/etc. If tools are missing HERE but present above, that IS a bridge bug: report it. |
+| `NNN-azure-response.json` | the model's actual reply — does `tool_calls` appear? If the model returned plain `content` with no `tool_calls` for a "read this file" prompt, the model isn't driving the tools (model behaviour, not proxy). |
+| `NNN-anthropic-response.json` | what we sent claude — `tool_use` blocks and `stop_reason` should mirror the Azure response. |
+
+Report: attach (or summarise) the first exchange's four files, and state whether
+`tool_calls` ever appeared in any `azure-response.json`. Trace files contain the
+full conversation — treat the directory as sensitive and delete it afterwards.
+
 ## Troubleshooting
 
 | Symptom | Meaning / action |

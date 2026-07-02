@@ -1,37 +1,107 @@
-using Azure.AI.OpenAI;
-using Azure.Identity;
+using AFClaude;
 using Microsoft.Agents.AI;
 using OpenAI.Chat;
 
-var builder = WebApplication.CreateBuilder(args);
+var useHttp = args.Contains("--http", StringComparer.OrdinalIgnoreCase)
+    || string.Equals(Environment.GetEnvironmentVariable("AFClaude__Mode"), "http", StringComparison.OrdinalIgnoreCase);
 
-var endpointValue = builder.Configuration["Foundry:Endpoint"];
-var deployment = builder.Configuration["Foundry:Deployment"];
-
-if (string.IsNullOrWhiteSpace(endpointValue) || !Uri.TryCreate(endpointValue, UriKind.Absolute, out var endpoint))
+if (useHttp)
 {
-    throw new InvalidOperationException(
-        "Missing or invalid configuration 'Foundry:Endpoint'. Set the Foundry__Endpoint environment variable " +
-        "to the Azure OpenAI/Foundry resource endpoint, e.g. https://<resource>.openai.azure.com/");
+    await RunHttpAsync(args);
+}
+else
+{
+    await RunMcpAsync(args);
 }
 
-if (string.IsNullOrWhiteSpace(deployment))
+// MCP stdio server — the primary Claude integration path. Exposes ask_foundry.
+static async Task RunMcpAsync(string[] args)
 {
-    throw new InvalidOperationException(
-        "Missing configuration 'Foundry:Deployment'. Set the Foundry__Deployment environment variable " +
-        "to the target deployment name.");
+    var builder = Host.CreateApplicationBuilder(args);
+
+    // Stdio transport uses stdout exclusively for JSON-RPC; all logs must go to stderr.
+    builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
+
+    var (chatClient, _) = FoundryClientFactory.Create(builder.Configuration);
+    AIAgent agent = chatClient.AsAIAgent(
+        instructions: "You are a local proxy agent. Preserve the caller's intent.");
+    builder.Services.AddSingleton(agent);
+
+    builder.Services
+        .AddMcpServer()
+        .WithStdioServerTransport()
+        .WithToolsFromAssembly();
+
+    await builder.Build().RunAsync();
 }
 
-var azureClient = new AzureOpenAIClient(endpoint, new AzureCliCredential());
-var chatClient = azureClient.GetChatClient(deployment);
+// OpenAI-compatible HTTP proxy — secondary path for other OpenAI-compatible clients.
+static async Task RunHttpAsync(string[] args)
+{
+    var builder = WebApplication.CreateBuilder(args);
 
-AIAgent agent = chatClient.AsAIAgent(
-    instructions: "You are a local proxy agent. Preserve the caller's intent.");
+    var (chatClient, deployment) = FoundryClientFactory.Create(builder.Configuration);
+    builder.Services.AddSingleton(chatClient);
+    builder.Services.AddSingleton(new DeploymentInfo(deployment));
 
-builder.Services.AddSingleton(agent);
+    var app = builder.Build();
 
-var app = builder.Build();
+    app.MapGet("/v1/models", (DeploymentInfo info) => Results.Json(new
+    {
+        @object = "list",
+        data = new[]
+        {
+            new { id = info.Deployment, @object = "model", owned_by = "azure-foundry" }
+        }
+    }));
 
-app.MapGet("/", () => "AFClaude is running.");
+    app.MapPost("/v1/chat/completions", async (
+        OpenAiChatRequest request,
+        ChatClient chatClient,
+        DeploymentInfo info,
+        CancellationToken cancellationToken) =>
+    {
+        var messages = request.Messages.Select(ToChatMessage).ToList();
 
-app.Run();
+        var completion = await chatClient.CompleteChatAsync(messages, cancellationToken: cancellationToken);
+
+        var text = completion.Value.Content.Count > 0
+            ? completion.Value.Content[0].Text
+            : string.Empty;
+
+        return Results.Json(new
+        {
+            id = $"chatcmpl-{Guid.NewGuid():N}",
+            @object = "chat.completion",
+            created = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            model = request.Model ?? info.Deployment,
+            choices = new[]
+            {
+                new
+                {
+                    index = 0,
+                    message = new { role = "assistant", content = text },
+                    finish_reason = "stop"
+                }
+            }
+        });
+    });
+
+    await app.RunAsync();
+}
+
+static ChatMessage ToChatMessage(OpenAiMessage message) => message.Role switch
+{
+    "system" => new SystemChatMessage(message.Content),
+    "assistant" => new AssistantChatMessage(message.Content),
+    _ => new UserChatMessage(message.Content),
+};
+
+internal sealed record DeploymentInfo(string Deployment);
+
+internal sealed record OpenAiChatRequest(
+    string? Model,
+    List<OpenAiMessage> Messages,
+    bool? Stream = false);
+
+internal sealed record OpenAiMessage(string Role, string Content);

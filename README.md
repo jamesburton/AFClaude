@@ -5,19 +5,27 @@ hosted on **Azure AI Foundry**, authenticated via `az login` (Entra ID / `AzureC
 with no API keys on disk.
 
 It wraps the Foundry model with **Microsoft Agent Framework** (`ChatClientAgent` over
-`IChatClient`) and exposes it two ways:
+`IChatClient`) and exposes it three ways:
 
-1. **MCP stdio server** (primary) — the way Claude Code/Desktop actually consumes local
+1. **MCP stdio server** (default) — the way Claude Code/Desktop actually consumes local
    tools. Claude launches the process, talks JSON-RPC over stdio, and calls a tool
    (e.g. `ask_foundry`) that forwards the prompt to the Foundry deployment.
-2. **OpenAI-compatible HTTP proxy** (secondary) — `POST /v1/chat/completions` and
+2. **`launch` mode** — starts an Anthropic Messages API-compatible endpoint
+   (`POST /v1/messages`) and execs `claude` itself pointed at it via
+   `ANTHROPIC_BASE_URL`, so Claude Code's *own* traffic runs against the Foundry
+   model. **Text-only for now — no tool use** (Read/Edit/Bash/etc. won't function);
+   see [Running claude against Foundry](#running-claude-against-foundry-launch).
+3. **OpenAI-compatible HTTP proxy** (`--http`) — `POST /v1/chat/completions` and
    `GET /v1/models`, for any other OpenAI-compatible client that wants to point at the
    same Foundry deployment over `http://127.0.0.1:<port>/v1`.
 
-> **Why two modes?** Claude Desktop/Code's MCP integration expects a **stdio MCP
-> server**, not an arbitrary OpenAI-compatible HTTP endpoint. The HTTP proxy is useful
-> for other tools but is not by itself something Claude can "point at" as a model
-> backend — see [Integrating with Claude](#integrating-with-claude).
+> **Why not just one HTTP mode?** Claude Desktop/Code's MCP integration expects a
+> **stdio MCP server**, not an HTTP endpoint at all. And when Claude Code *is* pointed
+> at a custom endpoint via `ANTHROPIC_BASE_URL`, it only speaks the **Anthropic
+> Messages API** wire format (`/v1/messages`) — never OpenAI's `/v1/chat/completions`.
+> So the three surfaces serve three distinct consumers: Claude via MCP (default), Claude
+> Code's own model traffic via `/v1/messages` (`launch`), and everything else that
+> already speaks OpenAI's HTTP API (`--http`).
 
 See [PLAN.md](PLAN.md) for the build plan, open decisions, and current status.
 
@@ -118,6 +126,28 @@ Claude then sees a single tool, `ask_foundry` (one required `prompt` string), th
 can call mid-conversation to delegate a prompt to the Foundry model. `az login` must
 have been run in advance, in the same user/environment context `dnx` will inherit.
 
+### Running `claude` against Foundry (`launch`)
+
+```powershell
+dnx AFClaude -y -- launch
+```
+
+This starts the Anthropic-compatible HTTP host on `http://127.0.0.1:31337` (override
+via `AFClaude__Launch__Port`), then execs `claude` with `ANTHROPIC_BASE_URL` pointed
+at it and `ANTHROPIC_MODEL` set to the configured Foundry deployment. Any arguments
+after `launch` are forwarded straight to `claude` — e.g.
+`dnx AFClaude -y -- launch --dangerously-skip-permissions`. When `claude` exits,
+AFClaude stops the proxy and exits with `claude`'s exit code.
+
+> **Current limitation: chat only, no tools.** The `/v1/messages` translation covers
+> plain text turns (including a `system` prompt) but does not yet translate
+> `tools`/`tool_use`/`tool_result` to Azure OpenAI function-calling. That means
+> Claude Code's actual coding-agent behavior — Read, Edit, Bash, and everything else
+> it does via tool calls — **will not work** in this mode yet; it's usable as a plain
+> chat interface against the Foundry model only. Tool-use bridging is planned as a
+> follow-up — see [PLAN.md](PLAN.md) Phase 6/7. Streaming responses are also a
+> single coalesced burst rather than true incremental token streaming.
+
 ### Other OpenAI-compatible clients (HTTP proxy, secondary)
 
 Run AFClaude in HTTP mode and point any OpenAI-compatible client at:
@@ -150,9 +180,11 @@ matching GitHub Environment and the `NUGET_USER` repo secret the workflow needs.
 
 ## Status
 
-Phases 1–4 done and smoke-tested (scaffold, HTTP proxy, MCP stdio server, `dnx`
-packaging + NuGet publish pipeline). Not yet done: an actual tag-triggered publish to
-nuget.org (needs the one-time Trusted Publishing setup above), a real Foundry
-round-trip (only tested against a fake endpoint so far), registering the tool in a
-live Claude Code session, and Phase 5/6 hardening (error shapes, streaming). See
-[PLAN.md](PLAN.md) for the full phase-by-phase detail.
+Phases 1–6 done and verified: scaffold, HTTP proxy, MCP stdio server, `dnx` packaging,
+a **live** NuGet Trusted Publishing pipeline (`AFClaude` is published on nuget.org,
+`dnx AFClaude -y` confirmed pulling the real published build), clean auth-error
+surfaces in both HTTP and MCP modes, and the `/v1/messages` + `launch` path (verified
+via `claude --version` end to end, not yet with a real interactive session against a
+real Foundry deployment). The main gap: `launch` mode is **chat-only** — no tool-use
+bridging yet, so `claude launch` can't actually use its tools. See
+[PLAN.md](PLAN.md) Phase 7 for what's left.

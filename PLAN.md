@@ -2,8 +2,8 @@
 
 Origin: this plan captures and structures a design chat about wrapping an Azure AI
 Foundry model for local use from Claude via Microsoft Agent Framework, .NET 10, `dnx`,
-and `az`-based auth. Phases 1–5 are implemented and verified as described below (see
-each phase for exactly what "verified" means); Phase 6 is still ahead.
+and `az`-based auth. Phases 1–6 are implemented and verified as described below (see
+each phase for exactly what "verified" means); Phase 7 is still ahead.
 
 ## Open decisions
 
@@ -195,11 +195,78 @@ the actual finding; the rest still need a decision before the phase that touches
   reachable here; re-check the expired-session message against a real `az` install
   when convenient.
 
-## Phase 6 — Polish (only once 1–5 work end to end)
+## Phase 6 — `launch` command + Anthropic Messages API endpoint — DONE (text-only)
 
-- Streaming, if decided in scope
-- Error surface parity between HTTP and MCP modes (same underlying failures, mode
-  -appropriate presentation)
+**Origin:** a follow-up ask — support `dnx AFClaude -- launch [...args]` to start the
+HTTP proxy and run `claude` (Claude Code) in the same session, routed to the Foundry
+model via env vars.
+
+**Key finding (research, not assumption):** Claude Code's `ANTHROPIC_BASE_URL` only
+speaks the **Anthropic Messages API** wire format (`POST /v1/messages`) — it has no
+OpenAI-compatibility mode. Pointing Claude Code at the existing `/v1/chat/completions`
+endpoint (OpenAI-shaped) would not work; every request would fail to parse. Source:
+Claude Code's own gateway-protocol docs, cited via a `claude-code-guide` research
+task — `ANTHROPIC_BASE_URL` → `Selected by` → "Anthropic Messages" →
+`/v1/messages` (+ optional `/v1/messages/count_tokens`); no `OPENAI_BASE_URL` or
+format-translation exists.
+
+- `AnthropicMessages.cs`: `AnthropicMessagesRequest`/`AnthropicMessageIn` DTOs
+  (`max_tokens` needs an explicit `[JsonPropertyName]` — camelCase-insensitive
+  matching doesn't bridge `max_tokens` → `MaxTokens`) and `AnthropicContent.ExtractText`,
+  which accepts Anthropic's `content` field in either shape (plain string, or an
+  array of blocks) and concatenates `type: "text"` blocks.
+- `POST /v1/messages` added to the same `BuildHttpApp` host as the OpenAI endpoints
+  (`--http` mode now serves both shapes on one Kestrel instance). Supports both
+  `stream: false` (plain JSON) and `stream: true` (a **coalesced** SSE burst —
+  `message_start` → `content_block_start` → one `content_block_delta` carrying the
+  full reply → `content_block_stop` → `message_delta` → `message_stop` — not
+  incremental token-by-token streaming from Azure). Same auth-failure/generic-failure
+  classification and Anthropic-shaped `{type: "error", error: {type, message}}` body
+  as the OpenAI endpoint's `{error: {...}}` shape, via the shared `FoundryErrors`
+  helper.
+- **Scope explicitly limited to text — no tool-use bridging.** `tool_use`/
+  `tool_result` content blocks and the `tools` request field are not translated.
+  This means **Claude Code's actual tools (Read/Edit/Bash/etc.) will not function**
+  against this endpoint — only plain conversational text. This was a scope decision
+  surfaced to the user (full tool-use bridging vs. text-only vs. text-first) with no
+  reply received in time; proceeded with the smallest working increment per the
+  fallback default, consistent with how every other phase in this plan started
+  small and verified before extending. **Follow-up phase needed** before `claude`
+  is useful as an actual coding agent against Foundry: translate Anthropic
+  `tools`/`tool_use`/`tool_result` to/from Azure OpenAI function-calling, and
+  consider real incremental Azure streaming instead of the coalesced-burst
+  approximation.
+- `launch` subcommand (`Program.cs`): `dnx AFClaude -- launch [claude-args...]` —
+  fail-fast config check (reusing `FoundryClientFactory.Create`) → starts the shared
+  HTTP host bound to a fixed local port (`http://127.0.0.1:31337`, overridable via
+  `AFClaude__Launch__Port`) → spawns `claude` as a child process with
+  `ANTHROPIC_BASE_URL` set to that URL, `ANTHROPIC_MODEL` set to the configured
+  Foundry deployment, and a placeholder non-empty `ANTHROPIC_API_KEY` (the proxy
+  itself doesn't check any auth header, but Claude Code likely expects *some*
+  credential present to avoid its interactive OAuth login flow — unconfirmed by the
+  research beyond that env var's existence, so treat this as a reasonable default,
+  not a verified requirement) → forwards all args after `launch` straight to
+  `claude` → waits for it to exit → stops the HTTP host → exits with `claude`'s exit
+  code.
+- Exit criteria — verified live, twice: (1) missing config fails fast before the
+  HTTP host binds or `claude` spawns, identical to Phase 1's exit criteria; (2) with
+  valid-shaped config, `dnx AFClaude launch --version` started the proxy on
+  `127.0.0.1:31337`, spawned `claude --version` with the env vars set, which printed
+  its real version and exited 0, after which AFClaude stopped the host and exited 0
+  itself. **Not yet verified:** an actual interactive `claude` conversation
+  round-tripping through `/v1/messages` against a real Foundry deployment — this
+  needs a real endpoint + `az login`, and (per the scope note above) will currently
+  only work for plain chat, not tool-using turns.
+
+## Phase 7 — Polish (only once 1–6 work end to end)
+
+- Tool-use bridging for `/v1/messages` (see Phase 6 follow-up) — the highest-value
+  remaining gap, since it's what makes `claude launch` useful as a coding agent
+  rather than a chatbot
+- Real incremental streaming (both `/v1/chat/completions` and `/v1/messages`), if
+  decided in scope, replacing `/v1/messages`'s coalesced-burst SSE approximation
+- Error surface parity across all three surfaces (HTTP OpenAI, HTTP Anthropic, MCP —
+  same underlying failures, surface-appropriate presentation)
 - Basic integration test hitting a real (or recorded) Foundry response
 
 ## Explicitly out of scope for now

@@ -10,7 +10,15 @@ resources.
 > v0.2.1/v0.2.2 re-test — 6a/6b PASS, 6c FAIL differently: trace mode showed the
 > bridge mapping Claude Code's trailing `role:"system"` hook message to a final
 > *user* turn, burying the task (fixed in v0.2.3: system-role preserved in place;
-> PLAN.md Phase 8.2). **For a v0.3.2 re-test, only Stage 7b needs re-running** (v0.3.1 fixed the `anthropic-beta` header rejection but the run then hit Foundry rejecting the beta-gated `context_management` BODY field — v0.3.2 filters the body to standard Messages API fields by default; 7a passed on v0.3.0, 7c confirmed a gpt-4.1 model limit).
+> PLAN.md Phase 8.2). v0.3.0–v0.3.2 (Stage 7): 7a PASS; 7b hit the
+> `anthropic-beta` header rejection (fixed v0.3.1, strip) then the
+> `context_management` body-field rejection (fixed v0.3.2, strict body filter);
+> 7c confirmed gpt-4.1 won't drive tool calls — a model limit, not a proxy bug.
+> **2026-07-03: Stage 7b PASSED on v0.3.2** — real Claude Code → AFClaude
+> passthrough → genuine claude-sonnet-4-6 on Foundry, tool call executed,
+> correct output. (One false FAIL on the way: the probe file must be inside the
+> launch working directory — Claude Code's own permission gate denies
+> out-of-scope reads in `-p` mode; commands below updated accordingly.)
 > The account needs the "Cognitive Services OpenAI User" role on the resource —
 > already granted on qhub-infra-resource during the first run.
 
@@ -189,13 +197,19 @@ AFClaude sets a placeholder `ANTHROPIC_API_KEY=afclaude-local` — if claude
 instead demands login/OAuth or rejects the key, record the exact behaviour; that
 assumption is wrong and needs a fix.
 
-**6c — real tool use through claude** (uses Read, which needs no permission
-prompt):
+**6c — real tool use through claude:**
 
 ```powershell
-Set-Content -Path "$env:TEMP\afclaude-probe.txt" -Value "PROBE-VALUE-12345"
-dnx AFClaude@0.3.2 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+Set-Content -Path "$PWD\afclaude-probe.txt" -Value "PROBE-VALUE-12345"   # MUST be in the working directory — see note below
+dnx AFClaude@0.3.2 -y -- launch -p "Read the file $PWD\afclaude-probe.txt and reply with only its contents."
 ```
+
+> **The probe file must live inside the working directory `launch` runs from.**
+> Claude Code's own file-access permission gate silently denies out-of-scope
+> reads in `-p` mode (no prompt is possible) — a probe in `$env:TEMP` produces a
+> false FAIL where the tool call round-trips fine but the tool itself is denied.
+> Confirmed live on the v0.3.2 run: identical setup failed with a TEMP path and
+> passed with a working-directory path. Delete the probe file afterwards.
 
 PASS: prints `PROBE-VALUE-12345`. This is the end-to-end proof of Phase 7:
 claude planned a tool call, the proxy bridged it to Azure function-calling and
@@ -223,7 +237,7 @@ Re-run 6c with tracing enabled:
 
 ```powershell
 $env:AFClaude__TraceDir = "$env:TEMP\afclaude-trace"
-dnx AFClaude@0.3.2 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+dnx AFClaude@0.3.2 -y -- launch -p "Read the file $PWD\afclaude-probe.txt and reply with only its contents."
 ```
 
 Then inspect `$env:TEMP\afclaude-trace` — per request `NNN`:
@@ -275,8 +289,8 @@ non-zero usage. (First call includes the one-off 1-token detection probe.)
 **7b — Claude Code on a real Claude model (the goal of the whole project):**
 
 ```powershell
-Set-Content -Path "$env:TEMP\afclaude-probe.txt" -Value "PROBE-VALUE-12345"
-dnx AFClaude@0.3.2 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+Set-Content -Path "$PWD\afclaude-probe.txt" -Value "PROBE-VALUE-12345"   # MUST be in the working directory — see note below
+dnx AFClaude@0.3.2 -y -- launch -p "Read the file $PWD\afclaude-probe.txt and reply with only its contents."
 ```
 
 PASS: stderr shows `Native Anthropic (Claude) deployment detected — /v1/messages

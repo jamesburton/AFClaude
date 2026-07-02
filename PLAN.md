@@ -480,8 +480,8 @@ matched API; keep the OpenAI path for future OpenAI-only hosts like Ollama):
   the anthropic leg runs with `Foundry__Api` unset to exercise real auto-detection:
   both legs PASS (probe value round-tripped; passthrough leg streamed SSE).
 
-Still unverified against real Azure: the passthrough with a real Claude deployment
-(qhub-sweden `claude-sonnet-4-6`) — TESTING.md Stage 7.
+Verified against a real Claude deployment (qhub-sweden `claude-sonnet-4-6`) after
+the Phase 9.1/9.2 fixes — see Phase 9.2's closing verification.
 
 ## Phase 9.1 — Stage 7 findings: strip `anthropic-beta` by default — DONE
 
@@ -526,6 +526,17 @@ else) | `passthrough`. Applied in `PrepareBody` alongside the model rewrite, so
 schema for ANY non-standard key, so the E2E anthropic leg catches future claude
 body fields automatically — both legs re-PASS with the real `claude` CLI.
 40 tests.
+
+**Verified live (2026-07-03, Framework, v0.3.2): Stage 7b PASS — the project's
+original goal, end to end.** Real Claude Code → AFClaude native passthrough →
+genuine `claude-sonnet-4-6` on Azure AI Foundry over Entra auth: both strip
+layers fired (header flags + `context_management`/`output_config` body fields, no
+400s), two `/v1/messages` round trips (`tool_use` → `tool_result`), correct final
+output. One false FAIL on the way, worth remembering: **the probe file must live
+inside the `launch` working directory** — Claude Code's own file-access
+permission gate silently denies out-of-scope reads in `-p` mode (no prompt
+possible), which looks like a proxy failure but isn't. TESTING.md commands now
+use working-directory paths.
 
 ## Phase 10 — Polish (remaining)
 

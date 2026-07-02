@@ -214,13 +214,19 @@ matching GitHub Environment and the `NUGET_USER` repo secret the workflow needs.
 
 ## Status
 
-Phases 1–8 done and verified: scaffold, HTTP proxy, MCP stdio server, `dnx` packaging,
-a **live** NuGet Trusted Publishing pipeline, clean auth-error surfaces, the
-`/v1/messages` + `launch` path, and full tool-use bridging for `/v1/messages` —
-**verified against a real Azure AI Foundry deployment** (gpt-4.1, Entra auth via
-`az login`): real chat completions, Anthropic-shaped text + streaming turns, a full
-tool_use/tool_result round trip, MCP `ask_foundry`, and `claude -p` through `launch`
-all pass. Auth failures are classified into actionable messages (az missing, session
-expired, `az` CLI token timeout, missing data-plane RBAC role). See
-[PLAN.md](PLAN.md) Phase 9 for what's left (true incremental streaming, error-surface
-parity).
+**The project's core goal is verified end to end**: real Claude Code, routed
+through AFClaude's native passthrough, driving a genuine Claude model
+(`claude-sonnet-4-6`) deployed on Azure AI Foundry over Entra auth — tool calls
+executing correctly, streaming incrementally, no API keys anywhere.
+
+Phases 1–9 done and verified: scaffold, HTTP proxy, MCP stdio server, `dnx`
+packaging, a **live** NuGet Trusted Publishing pipeline, classified auth-error
+surfaces (az missing / token timeout / expired session / missing data-plane RBAC
+role), full Anthropic↔OpenAI tool-use bridging for GPT-family deployments, and
+the auto-detected native Anthropic passthrough for Claude deployments (with
+Foundry-compatibility filtering of `anthropic-beta` flags and beta-gated body
+fields). Verified against real Foundry deployments of both kinds. Known model
+limit: gpt-4.1 through the (correct) bridge doesn't reliably drive Claude Code's
+tools — prefer a Claude deployment for `launch` mode. See [PLAN.md](PLAN.md)
+Phase 10 for what's left (bridge-path incremental streaming, error-surface
+parity, non-Azure OpenAI hosts).

@@ -54,6 +54,11 @@ MCP stdio transport, reusing the same `ChatClientAgent`/`IChatClient` underneath
 - .NET 10 SDK
 - Azure CLI, logged in with access to the target Foundry resource: `az login`
 - An Azure AI Foundry (or Azure OpenAI) resource with a model deployment
+- **A data-plane RBAC role on that resource** — grant the account the
+  **Cognitive Services OpenAI User** role. Control-plane roles (even subscription
+  **Owner**) do **not** grant inference access under Entra auth; without the
+  data-plane role every request is rejected as unauthorized. Allow a minute or two
+  for a fresh role assignment to propagate.
 
 ## Configuration
 
@@ -61,8 +66,9 @@ Set via environment variables (or `appsettings.json` / `dotnet user-secrets` loc
 
 | Variable              | Example                                            | Notes |
 |-----------------------|-----------------------------------------------------|-------|
-| `Foundry__Endpoint`   | `https://<resource>.openai.azure.com/`             | Azure OpenAI-style resource endpoint. If the deployment is a Foundry *project* endpoint instead, this will look like `https://<project>.services.ai.azure.com/` — confirm which one your deployment uses (see [PLAN.md](PLAN.md)). |
+| `Foundry__Endpoint`   | `https://<resource>.cognitiveservices.azure.com/`  | Use whatever `az cognitiveservices account list` reports as `properties.endpoint`. The `.cognitiveservices.azure.com` shape is verified live against a real AIServices/Foundry resource; `.openai.azure.com` resource endpoints should work identically. |
 | `Foundry__Deployment` | `gpt-4o-mini`                                       | Deployment name, not the base model name. |
+| `Foundry__CliTimeoutSeconds` | `60` (default)                              | How long to wait for the `az` CLI to produce a token. The Azure SDK default (13s) is too short for a cold `az` start on slow or loaded machines (14–24s observed) — AFClaude defaults to 60; raise it if you still see token-timeout errors. |
 
 No API keys are configured — auth is entirely via `AzureCliCredential` (falls back to
 other `DefaultAzureCredential` sources if you later want that instead).
@@ -186,12 +192,13 @@ matching GitHub Environment and the `NUGET_USER` repo secret the workflow needs.
 
 ## Status
 
-Phases 1–7 done and verified: scaffold, HTTP proxy, MCP stdio server, `dnx` packaging,
-a **live** NuGet Trusted Publishing pipeline (`AFClaude` is published on nuget.org,
-`dnx AFClaude -y` confirmed pulling the real published build), clean auth-error
-surfaces in both HTTP and MCP modes, the `/v1/messages` + `launch` path (verified
-via `claude --version` end to end), and full tool-use bridging for `/v1/messages`
-(unit-tested in both directions; request side smoke-tested live up to the Azure auth
-boundary). Still unverified: any round trip against a **real** Foundry deployment —
-everything so far runs against fake endpoints without `az login`. See
-[PLAN.md](PLAN.md) Phase 8 for what's left.
+Phases 1–8 done and verified: scaffold, HTTP proxy, MCP stdio server, `dnx` packaging,
+a **live** NuGet Trusted Publishing pipeline, clean auth-error surfaces, the
+`/v1/messages` + `launch` path, and full tool-use bridging for `/v1/messages` —
+**verified against a real Azure AI Foundry deployment** (gpt-4.1, Entra auth via
+`az login`): real chat completions, Anthropic-shaped text + streaming turns, a full
+tool_use/tool_result round trip, MCP `ask_foundry`, and `claude -p` through `launch`
+all pass. Auth failures are classified into actionable messages (az missing, session
+expired, `az` CLI token timeout, missing data-plane RBAC role). See
+[PLAN.md](PLAN.md) Phase 9 for what's left (true incremental streaming, error-surface
+parity).

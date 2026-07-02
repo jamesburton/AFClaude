@@ -27,8 +27,8 @@ static async Task RunMcpAsync(string[] args)
     // Stdio transport uses stdout exclusively for JSON-RPC; all logs must go to stderr.
     builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
 
-    var (chatClient, _) = FoundryClientFactory.Create(builder.Configuration);
-    AIAgent agent = chatClient.AsAIAgent(
+    var foundry = FoundryClientFactory.Create(builder.Configuration);
+    AIAgent agent = foundry.ChatClient.AsAIAgent(
         instructions: "You are a local proxy agent. Preserve the caller's intent.");
     builder.Services.AddSingleton(agent);
 
@@ -53,14 +53,31 @@ static async Task RunHttpAsync(string[] args)
 static async Task RunLaunchAsync(string[] claudeArgs)
 {
     var config = new ConfigurationBuilder().AddEnvironmentVariables().Build();
-    var (_, deployment) = FoundryClientFactory.Create(config); // fail fast before starting anything
+    var foundry = FoundryClientFactory.Create(config); // fail fast before starting anything
+    var deployment = foundry.Deployment;
 
     var port = config.GetValue<int?>("Launch:Port") ?? 31337;
     var baseUrl = $"http://127.0.0.1:{port}";
 
-    var app = BuildHttpApp([], baseUrl);
+    var app = BuildHttpApp([], baseUrl, foundry);
     await app.StartAsync();
     Console.Error.WriteLine($"AFClaude proxy listening on {baseUrl} (Foundry deployment: {deployment})");
+
+    // Warm the Entra token before claude's first request: a cold `az` start can take
+    // tens of seconds, and a broken-auth claude session is useless — better to fail
+    // here with a classified message than let every claude turn 401.
+    Console.Error.WriteLine("Acquiring Azure token via 'az' (first acquisition can take a while)...");
+    try
+    {
+        await foundry.Credential.GetTokenAsync(
+            new Azure.Core.TokenRequestContext([FoundryClientFactory.TokenScope]), CancellationToken.None);
+        Console.Error.WriteLine("Azure token acquired.");
+    }
+    catch (Exception ex)
+    {
+        await app.StopAsync();
+        throw new InvalidOperationException(FoundryErrors.Describe(ex), ex);
+    }
 
     var psi = new ProcessStartInfo("claude") { UseShellExecute = false };
     foreach (var a in claudeArgs)
@@ -89,7 +106,7 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     Environment.ExitCode = claude.ExitCode;
 }
 
-static WebApplication BuildHttpApp(string[] args, string? bindUrl = null)
+static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, FoundryClient? foundry = null)
 {
     var builder = WebApplication.CreateBuilder(args);
     if (bindUrl is not null)
@@ -97,11 +114,14 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null)
         builder.WebHost.UseUrls(bindUrl);
     }
 
-    var (chatClient, deployment) = FoundryClientFactory.Create(builder.Configuration);
-    builder.Services.AddSingleton(chatClient);
-    builder.Services.AddSingleton(new DeploymentInfo(deployment));
+    foundry ??= FoundryClientFactory.Create(builder.Configuration);
+    builder.Services.AddSingleton(foundry.ChatClient);
+    builder.Services.AddSingleton(new DeploymentInfo(foundry.Deployment));
 
     var app = builder.Build();
+
+    // claude's startup probe HEADs the base URL; answer instead of 404ing.
+    app.MapMethods("/", ["GET", "HEAD"], () => Results.Text("AFClaude is running."));
 
     app.MapGet("/v1/models", (DeploymentInfo info) => Results.Json(new
     {

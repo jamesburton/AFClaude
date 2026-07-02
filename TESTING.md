@@ -2,8 +2,16 @@
 
 Instructions for an agent (Claude Code or similar) running on a machine where
 `az login` has already been completed for an organisation with Azure AI Foundry
-resources. Everything before this release was verified only against fake endpoints;
-this run is the first genuine round trip.
+resources.
+
+> **Run history:** the full plan ran on v0.2.0 (Framework, 2026-07-02): Stages 1–6b
+> PASS, Stage 6c FAIL on `AzureCliCredential`'s 13s process timeout — fixed in
+> v0.2.1 (60s default + `Foundry__CliTimeoutSeconds` + token cache + launch-mode
+> warm-up; see PLAN.md Phase 8). **For a v0.2.1 re-test, only Stage 6 needs
+> re-running** (plus Stage 2 as a quick sanity check). Expect new behaviour in
+> Stage 6: an "Acquiring Azure token via 'az' ..." line before claude starts.
+> The account needs the "Cognitive Services OpenAI User" role on the resource —
+> already granted on qhub-infra-resource during the first run.
 
 **Rules for the agent executing this:**
 
@@ -50,7 +58,7 @@ PASS: `az account show` returns the expected org tenant; a deployment is identif
 
 ```powershell
 $env:Foundry__Endpoint = ""; $env:Foundry__Deployment = ""
-dnx AFClaude@0.2.0 -y
+dnx AFClaude@0.2.1 -y
 ```
 
 PASS: downloads from nuget.org (first run may take ~a minute) and exits with an
@@ -64,7 +72,7 @@ Start the proxy on a fixed port (background job), then hit it:
 
 ```powershell
 $env:ASPNETCORE_URLS = "http://127.0.0.1:31399"
-$proxy = Start-Job { dnx AFClaude@0.2.0 -y -- --http }
+$proxy = Start-Job { dnx AFClaude@0.2.1 -y -- --http }
 Start-Sleep -Seconds 20   # first run resolves the tool; check Receive-Job $proxy if unsure
 
 Invoke-RestMethod http://127.0.0.1:31399/v1/models | ConvertTo-Json -Depth 5
@@ -149,7 +157,7 @@ Stop the proxy: `Stop-Job $proxy; Remove-Job $proxy`.
 ## Stage 5 — MCP surface (`ask_foundry`)
 
 ```powershell
-claude mcp add afclaude --env Foundry__Endpoint=$env:Foundry__Endpoint --env Foundry__Deployment=$env:Foundry__Deployment -- dnx AFClaude@0.2.0 -y
+claude mcp add afclaude --env Foundry__Endpoint=$env:Foundry__Endpoint --env Foundry__Deployment=$env:Foundry__Deployment -- dnx AFClaude@0.2.1 -y
 claude -p "Use the ask_foundry tool to ask: 'Reply with exactly MCP OK'. Report the tool's response verbatim." --allowedTools "mcp__afclaude__ask_foundry"
 claude mcp remove afclaude   # cleanup
 ```
@@ -163,7 +171,7 @@ the tool reached Foundry). If `claude mcp add` syntax differs on this version,
 **6a — pipeline smoke (safe, non-interactive):**
 
 ```powershell
-dnx AFClaude@0.2.0 -y -- launch --version
+dnx AFClaude@0.2.1 -y -- launch --version
 ```
 
 PASS: prints `AFClaude proxy listening on http://127.0.0.1:31337 ...`, then the
@@ -172,7 +180,7 @@ claude version, exits 0. (Port busy? Set `$env:AFClaude__Launch__Port = "31401"`
 **6b — real text turn through claude (print mode, non-interactive):**
 
 ```powershell
-dnx AFClaude@0.2.0 -y -- launch -p "Reply with exactly: LAUNCH OK"
+dnx AFClaude@0.2.1 -y -- launch -p "Reply with exactly: LAUNCH OK"
 ```
 
 PASS: prints `LAUNCH OK`. **Known-unverified assumption being tested here:**
@@ -185,7 +193,7 @@ prompt):
 
 ```powershell
 Set-Content -Path "$env:TEMP\afclaude-probe.txt" -Value "PROBE-VALUE-12345"
-dnx AFClaude@0.2.0 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
+dnx AFClaude@0.2.1 -y -- launch -p "Read the file $env:TEMP\afclaude-probe.txt and reply with only its contents."
 ```
 
 PASS: prints `PROBE-VALUE-12345`. This is the end-to-end proof of Phase 7:

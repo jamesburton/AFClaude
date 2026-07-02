@@ -2,8 +2,8 @@
 
 Origin: this plan captures and structures a design chat about wrapping an Azure AI
 Foundry model for local use from Claude via Microsoft Agent Framework, .NET 10, `dnx`,
-and `az`-based auth. Phases 1–7 are implemented and verified as described below (see
-each phase for exactly what "verified" means); Phase 8 is still ahead.
+and `az`-based auth. Phases 1–8 are implemented and verified as described below (see
+each phase for exactly what "verified" means); Phase 9 is still ahead.
 
 ## Open decisions
 
@@ -16,17 +16,20 @@ the actual finding; the rest still need a decision before the phase that touches
    plus `[McpServerToolType]`/`[McpServerTool]` on `FoundryTools` (Phase 3) — verified
    end to end against the real `AFClaude.dll`: `initialize` and `tools/list` both
    return correct JSON-RPC responses, `ask_foundry` shows up with the right schema.
-2. **Foundry endpoint style.** Still open — Azure OpenAI resource endpoints
-   (`https://<resource>.openai.azure.com/`) and Azure AI Foundry *project* endpoints
-   (`https://<project>.services.ai.azure.com/`) are different shapes with possibly
-   different SDK entry points (`AzureOpenAIClient` vs a Foundry project client). Phase
-   1 code assumes the resource-endpoint shape (`AzureOpenAIClient(Uri,
-   TokenCredential)`). Confirm which one applies to the actual target deployment
-   before relying on this against a real resource.
-3. **Entra scope / token audience.** Still open, but likely moot: `AzureOpenAIClient`
-   sets its own token scope internally when given a `TokenCredential` — no code in
-   Phase 1 hand-rolls a scope. Revisit only if auth fails against a real resource in a
-   way that suggests a scope mismatch.
+2. **Foundry endpoint style — RESOLVED (Phase 8, real-Foundry run).** The shape that
+   `az cognitiveservices account list` reports as `properties.endpoint` is what works
+   with `AzureOpenAIClient(Uri, TokenCredential)`. On the tested org (fnz-qhub), all
+   AIServices accounts reported `https://<resource>.cognitiveservices.azure.com/`,
+   which passed every stage against a real gpt-4.1 deployment.
+   `.openai.azure.com` / `.services.ai.azure.com` shapes were not exercised (the
+   first shape worked immediately) — if a future org reports one of those, try it
+   as-is before assuming a different SDK entry point is needed.
+3. **Entra scope / token audience — RESOLVED (Phase 8).** Moot as predicted:
+   `AzureOpenAIClient` requests `https://cognitiveservices.azure.com/.default`
+   internally and real-Foundry auth succeeded with no scope handling in our code.
+   (That scope is now also referenced explicitly by launch mode's token warm-up —
+   `FoundryClientFactory.TokenScope`.) The auth failure that *did* occur was RBAC,
+   not scope — see Phase 8.
 4. **OpenAI .NET SDK message construction — RESOLVED.** Confirmed by reflecting the
    installed `OpenAI` 2.1.0 assembly: `OpenAI.Chat.ChatMessage` is abstract;
    `UserChatMessage(string)`, `SystemChatMessage(string)`, and
@@ -313,14 +316,63 @@ same fallback rule as Phase 6.
   real Azure auth boundary. **Still unverified (needs real `az login` + endpoint):**
   a genuine tool-calling round trip where the model actually returns function calls.
 
-## Phase 8 — Polish (remaining)
+## Phase 8 — Real-Foundry verification + auth robustness — DONE
+
+**First genuine Azure round trip**, run via `TESTING.md` on the Framework machine
+(Windows 11, `az` configured for the fnz-qhub tenant; resource
+`qhub-infra-resource` in `rg-qhub-infra`, deployment `gpt-4.1`, endpoint shape
+`https://<resource>.cognitiveservices.azure.com/`). Results on v0.2.0:
+Stages 1–6b all PASS — real `/v1/chat/completions`, `/v1/messages` text +
+streaming (real usage tokens), tool_use emission **and** tool_result round trip,
+MCP `ask_foundry`, `launch --version`, and `launch -p` text (the placeholder
+`ANTHROPIC_API_KEY=afclaude-local` assumption **held** — no OAuth prompt).
+`/v1/messages/count_tokens` was never requested by claude in these runs.
+
+Two real defects surfaced, both fixed in this phase:
+
+1. **`AzureCliCredential`'s fixed 13s `ProcessTimeout` is too short** — a cold `az`
+   start took 14–24s on the test machine, so any request needing a fresh token
+   reliably failed (Stage 6c FAIL: each `launch` starts a new process → uncached
+   token → timeout). Fix: `ProcessTimeout` now defaults to **60s**, configurable
+   via `Foundry__CliTimeoutSeconds`; tokens are cached in-process
+   (`CachingTokenCredential` — `AzureCliCredential` itself spawns `az` on *every*
+   `GetToken` and never caches, refresh 5 min before expiry); and `launch` mode
+   **warms the token before spawning `claude`** through the same credential
+   instance the request pipeline uses, failing fast with a classified message
+   instead of letting every claude turn 401.
+2. **The "session may have expired" message was misleading** — observed firing for
+   both the az-timeout case above and a **data-plane RBAC gap** (subscription Owner
+   without "Cognitive Services OpenAI User" on the resource; control-plane roles do
+   not grant inference under Entra auth — fixed on the org side with
+   `az role assignment create --role "Cognitive Services OpenAI User"` + ~60–90s
+   propagation). Fix: `FoundryErrors` now classifies four distinct auth failures —
+   az missing (`CredentialUnavailableException`), az token timeout
+   (`AuthenticationFailedException` + "timed out", points at
+   `Foundry__CliTimeoutSeconds`), genuinely expired/wrong-tenant session, and
+   service 401/403 (`ClientResultException`/`RequestFailedException` status,
+   points at the RBAC role). `IsAuthFailure` includes the 401/403 case, so RBAC
+   failures now return 401 with the actionable message instead of a generic 500.
+3. Minor: `GET|HEAD /` now returns `200 "AFClaude is running."` — the claude CLI
+   probes the base URL at startup and previously got a 404 (harmless but noisy).
+
+Exit criteria — verified: 22 unit tests pass (9 new: error classification incl. a
+faked `ClientResultException(401/403)`, plus `CachingTokenCredential` single-flight
+and near-expiry refresh); live smoke on the dev box confirms `launch` fails fast at
+warm-up with the clean classified message before `claude` spawns, `GET|HEAD /`
+return 200, and `/v1/messages` still returns the classified 401. **Stage 6c
+(launch tool-use through a real deployment) still needs a re-run on v0.2.1** — the
+fix directly targets its failure mode but hasn't been re-tested against the real
+org yet.
+
+## Phase 9 — Polish (remaining)
 
 - Real incremental streaming (both `/v1/chat/completions` and `/v1/messages`),
   replacing `/v1/messages`'s coalesced-burst SSE approximation — deltas must
   distinguish text vs. tool-call-in-progress now that tool_use blocks exist
 - Error surface parity across all three surfaces (HTTP OpenAI, HTTP Anthropic, MCP —
   same underlying failures, surface-appropriate presentation)
-- Basic integration test hitting a real (or recorded) Foundry response
+- `/v1/messages/count_tokens` if real usage ever shows claude requiring it (not
+  observed in the Phase 8 runs)
 
 ## Explicitly out of scope for now
 

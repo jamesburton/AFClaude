@@ -87,7 +87,7 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     }
 
     var psi = new ProcessStartInfo("claude") { UseShellExecute = false };
-    foreach (var a in claudeArgs)
+    foreach (var a in LaunchArgs.Translate(claudeArgs))
     {
         psi.ArgumentList.Add(a);
     }

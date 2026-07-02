@@ -29,6 +29,13 @@ Set-Content "$work\afclaude-probe.txt" -Value "PROBE-VALUE-12345"
 dotnet build "$root\src\AFClaude\AFClaude.csproj" -c Release -v q | Out-Null
 dotnet build "$PSScriptRoot\FakeAzure\FakeAzure.csproj" -c Release -v q | Out-Null
 
+# A stale FakeAzure (e.g. from a killed run — `dotnet run` children survive their
+# launcher) would silently serve old behaviour on 41443; clear it first.
+Get-NetTCPConnection -LocalPort 41443 -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+    Write-Host "Killing stale listener on 41443 (PID $($_.OwningProcess))"
+    taskkill /PID $_.OwningProcess /T /F | Out-Null
+}
+
 $env:FAKE_PROBE_PATH = "$work\afclaude-probe.txt"
 $env:FAKE_LOG_DIR = "$work\fake-azure-logs"
 $srv = Start-Process dotnet -ArgumentList 'run', '--project', "$PSScriptRoot\FakeAzure\FakeAzure.csproj", '-c', 'Release', '--no-build', '--no-launch-profile' -PassThru -WindowStyle Hidden
@@ -40,10 +47,17 @@ function Invoke-Leg([string]$leg) {
     $env:Foundry__Api = if ($leg -eq 'anthropic') { '' } else { 'openai' }   # anthropic leg tests auto-detection
     $env:AFClaude__TraceDir = "$work\trace-$leg"
 
+    # The anthropic leg also passes --yolo (translated by AFClaude to
+    # --dangerously-skip-permissions): an untranslated --yolo makes claude reject the
+    # whole invocation as an unknown option, so this live-verifies the translation.
+    # --allowedTools still does the actual permission granting — bypass-permissions
+    # mode needs a one-time interactive consent that a fresh machine hasn't given,
+    # so the leg must not depend on it.
+    $permArgs = if ($leg -eq 'anthropic') { @('--yolo', '--allowedTools', 'Read') } else { @('--allowedTools', 'Read') }
     Push-Location $work
     try {
         $out = dotnet run --project "$root\src\AFClaude\AFClaude.csproj" -c Release --no-build --no-launch-profile -- `
-            launch -p "Read the file $work\afclaude-probe.txt and reply with only its contents." --allowedTools "Read" 2>&1
+            launch -p "Read the file $work\afclaude-probe.txt and reply with only its contents." @permArgs 2>&1
     }
     finally {
         Pop-Location
@@ -54,7 +68,9 @@ function Invoke-Leg([string]$leg) {
         return $true
     }
     Write-Host "[$leg] FAIL: probe value missing from claude output." -ForegroundColor Red
-    $out | Select-Object -Last 12
+    # Write-Host, not pipeline output — anything emitted here becomes part of the
+    # function's return value and corrupts the caller's pass/fail check.
+    $out | Select-Object -Last 12 | ForEach-Object { Write-Host "  $_" }
     return $false
 }
 
@@ -71,5 +87,6 @@ try {
     exit 0
 }
 finally {
-    Stop-Process -Id $srv.Id -Force -Confirm:$false -ErrorAction SilentlyContinue
+    # taskkill /T: `dotnet run` spawns the app as a child that outlives its launcher.
+    taskkill /PID $srv.Id /T /F 2>$null | Out-Null
 }

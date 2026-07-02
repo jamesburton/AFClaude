@@ -145,10 +145,25 @@ dnx AFClaude -y -- launch
 
 This starts the Anthropic-compatible HTTP host on `http://127.0.0.1:31337` (override
 via `AFClaude__Launch__Port`), then execs `claude` with `ANTHROPIC_BASE_URL` pointed
-at it and `ANTHROPIC_MODEL` set to the configured Foundry deployment. Any arguments
-after `launch` are forwarded straight to `claude` — e.g.
-`dnx AFClaude -y -- launch --dangerously-skip-permissions`. When `claude` exits,
-AFClaude stops the proxy and exits with `claude`'s exit code.
+at it and `ANTHROPIC_MODEL` set to the configured Foundry deployment. When `claude`
+exits, AFClaude stops the proxy and exits with `claude`'s exit code.
+
+**All arguments after `launch` are forwarded to `claude` verbatim**, so every
+claude option works without AFClaude needing to know about it:
+
+```powershell
+dnx AFClaude -y -- launch --continue                      # resume most recent session
+dnx AFClaude -y -- launch --resume <session-id>           # resume a specific session
+dnx AFClaude -y -- launch --worktree feature-x            # run in a git worktree
+dnx AFClaude -y -- launch -p "summarize this repo"        # non-interactive print mode
+dnx AFClaude -y -- launch --dangerously-skip-permissions
+```
+
+One convenience alias is translated (exact whole-argument match only):
+`--yolo` → `--dangerously-skip-permissions`. Note claude requires a one-time
+interactive acceptance of bypass-permissions mode before it takes effect —
+in `-p` (print) mode on a machine that has never accepted it, prefer
+`--allowedTools`.
 
 **Claude deployments (native passthrough).** Claude models on Azure AI Foundry are
 served on a native Anthropic Messages endpoint (`{endpoint}/anthropic/v1/messages`),

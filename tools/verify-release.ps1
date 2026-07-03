@@ -50,6 +50,36 @@ if (-not $LaunchOnly) {
     }
 }
 
-if ($ok1 -and $ok2) { Write-Host "VERIFY PASS (AFClaude@$Version)" -ForegroundColor Green; exit 0 }
+$ok3 = $true
+if (-not $LaunchOnly) {
+    Write-Host "=== 3. error parity: unknown deployment -> 404 not_found_error ==="
+    $env:Foundry__Deployment = 'afclaude-no-such-deployment'
+    $env:Foundry__Api = 'openai'
+    $env:ASPNETCORE_URLS = 'http://127.0.0.1:31399'
+    $proxy = Start-Process dotnet -ArgumentList 'dnx', "AFClaude@$Version", '-y', '--', '--http' -PassThru -WindowStyle Hidden
+    try {
+        Start-Sleep -Seconds 15
+        $bodyFile = Join-Path $env:TEMP 'afclaude-parity-body.json'
+        '{"model":"x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}' | Set-Content $bodyFile -Encoding ascii
+        # curl.exe: version-agnostic 4xx handling (Windows PowerShell 5.1 throws on non-2xx)
+        $out = (curl.exe -s -X POST http://127.0.0.1:31399/v1/messages -H "content-type: application/json" --data "@$bodyFile" -w "`nHTTP_STATUS:%{http_code}") -join "`n"
+        $status = if ($out -match 'HTTP_STATUS:(\d+)') { $Matches[1] } else { '0' }
+        $ok3 = ($status -eq '404') -and ($out -match 'not_found_error')
+        Write-Host "status: $status; not_found_error present: $($out -match 'not_found_error')"
+        Write-Host ("error parity: " + $(if ($ok3) { 'PASS' } else { 'FAIL' }))
+        if (-not $ok3) { Write-Host "  $out" }
+    }
+    catch {
+        Write-Host "error parity: FAIL - $($_.Exception.Message)"
+        $ok3 = $false
+    }
+    finally {
+        taskkill /PID $proxy.Id /T /F 2>$null | Out-Null
+        $env:Foundry__Deployment = $Deployment
+        $env:Foundry__Api = ''
+    }
+}
+
+if ($ok1 -and $ok2 -and $ok3) { Write-Host "VERIFY PASS (AFClaude@$Version)" -ForegroundColor Green; exit 0 }
 Write-Host "VERIFY FAIL (AFClaude@$Version)" -ForegroundColor Red
 exit 1

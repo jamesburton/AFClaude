@@ -83,7 +83,7 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     catch (Exception ex)
     {
         await app.StopAsync();
-        throw new InvalidOperationException(FoundryErrors.Describe(ex), ex);
+        throw new InvalidOperationException(FoundryErrors.Classify(ex).Message, ex);
     }
 
     var psi = new ProcessStartInfo("claude") { UseShellExecute = false };
@@ -210,19 +210,13 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
                 }
             });
         }
-        catch (Exception ex) when (FoundryErrors.IsAuthFailure(ex))
-        {
-            logger.LogError(ex, "Chat completion auth failure");
-            return Results.Json(
-                new { error = new { message = FoundryErrors.Describe(ex), type = "authentication_error", code = (string?)null } },
-                statusCode: StatusCodes.Status401Unauthorized);
-        }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Chat completion failed");
+            var error = FoundryErrors.Classify(ex);
+            logger.LogError(ex, "Chat completion failed ({Status})", error.Status);
             return Results.Json(
-                new { error = new { message = FoundryErrors.Describe(ex), type = "server_error", code = (string?)null } },
-                statusCode: StatusCodes.Status500InternalServerError);
+                new { error = new { message = error.Message, type = error.OpenAiType, code = (string?)null } },
+                statusCode: error.Status);
         }
     });
 
@@ -256,12 +250,11 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Foundry API detection failed");
-            http.Response.StatusCode = FoundryErrors.IsAuthFailure(ex)
-                ? StatusCodes.Status401Unauthorized
-                : StatusCodes.Status500InternalServerError;
+            var error = FoundryErrors.Classify(ex);
+            logger.LogError(ex, "Foundry API detection failed ({Status})", error.Status);
+            http.Response.StatusCode = error.Status;
             await http.Response.WriteAsJsonAsync(
-                new { type = "error", error = new { type = FoundryErrors.IsAuthFailure(ex) ? "authentication_error" : "api_error", message = FoundryErrors.Describe(ex) } },
+                new { type = "error", error = new { type = error.AnthropicType, message = error.Message } },
                 cancellationToken);
             return;
         }
@@ -316,21 +309,13 @@ static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, Foundr
         {
             completion = await chatClient.CompleteChatAsync(messages, options, cancellationToken);
         }
-        catch (Exception ex) when (FoundryErrors.IsAuthFailure(ex))
-        {
-            logger.LogError(ex, "Anthropic-compatible completion auth failure");
-            http.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            await http.Response.WriteAsJsonAsync(
-                new { type = "error", error = new { type = "authentication_error", message = FoundryErrors.Describe(ex) } },
-                cancellationToken);
-            return;
-        }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Anthropic-compatible completion failed");
-            http.Response.StatusCode = StatusCodes.Status500InternalServerError;
+            var error = FoundryErrors.Classify(ex);
+            logger.LogError(ex, "Anthropic-compatible completion failed ({Status})", error.Status);
+            http.Response.StatusCode = error.Status;
             await http.Response.WriteAsJsonAsync(
-                new { type = "error", error = new { type = "api_error", message = FoundryErrors.Describe(ex) } },
+                new { type = "error", error = new { type = error.AnthropicType, message = error.Message } },
                 cancellationToken);
             return;
         }
@@ -439,20 +424,20 @@ static async Task StreamBridgeAsync(
     }
     catch (Exception ex) when (!started)
     {
-        logger.LogError(ex, "Streaming bridge completion failed before any output");
-        http.Response.StatusCode = FoundryErrors.IsAuthFailure(ex)
-            ? StatusCodes.Status401Unauthorized
-            : StatusCodes.Status500InternalServerError;
+        var error = FoundryErrors.Classify(ex);
+        logger.LogError(ex, "Streaming bridge completion failed before any output ({Status})", error.Status);
+        http.Response.StatusCode = error.Status;
         await http.Response.WriteAsJsonAsync(
-            new { type = "error", error = new { type = FoundryErrors.IsAuthFailure(ex) ? "authentication_error" : "api_error", message = FoundryErrors.Describe(ex) } },
+            new { type = "error", error = new { type = error.AnthropicType, message = error.Message } },
             cancellationToken);
         return;
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Streaming bridge failed mid-stream");
+        var error = FoundryErrors.Classify(ex);
+        logger.LogError(ex, "Streaming bridge failed mid-stream ({Status})", error.Status);
         await EmitAsync(new AnthropicStreamTranslator.SseEvent("error",
-            new { type = "error", error = new { type = "api_error", message = FoundryErrors.Describe(ex) } }));
+            new { type = "error", error = new { type = error.AnthropicType, message = error.Message } }));
     }
 
     if (traceSse is not null)
@@ -495,12 +480,11 @@ static async Task ForwardAnthropicAsync(
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "Anthropic passthrough failed before reaching Foundry");
-        http.Response.StatusCode = FoundryErrors.IsAuthFailure(ex)
-            ? StatusCodes.Status401Unauthorized
-            : StatusCodes.Status500InternalServerError;
+        var error = FoundryErrors.Classify(ex);
+        logger.LogError(ex, "Anthropic passthrough failed before reaching Foundry ({Status})", error.Status);
+        http.Response.StatusCode = error.Status;
         await http.Response.WriteAsJsonAsync(
-            new { type = "error", error = new { type = FoundryErrors.IsAuthFailure(ex) ? "authentication_error" : "api_error", message = FoundryErrors.Describe(ex) } },
+            new { type = "error", error = new { type = error.AnthropicType, message = error.Message } },
             cancellationToken);
         return;
     }

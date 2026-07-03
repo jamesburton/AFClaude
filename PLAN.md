@@ -2,8 +2,8 @@
 
 Origin: this plan captures and structures a design chat about wrapping an Azure AI
 Foundry model for local use from Claude via Microsoft Agent Framework, .NET 10, `dnx`,
-and `az`-based auth. Phases 1–10 are implemented and verified as described below (see
-each phase for exactly what "verified" means); Phase 11 is still ahead.
+and `az`-based auth. Phases 1–11 are implemented and verified as described below (see
+each phase for exactly what "verified" means); Phase 12 is still ahead.
 
 ## Open decisions
 
@@ -565,11 +565,34 @@ coalesced burst (`AnthropicStreamTranslator`, `src/AFClaude/AnthropicStreaming.c
 Not in scope here: SSE on the OpenAI-shaped `/v1/chat/completions` surface itself
 (its `stream` flag is still ignored — Phase 11).
 
-## Phase 11 — Polish (remaining)
+## Phase 11 — Error-surface parity — DONE
 
-- Error surface parity across all three surfaces (HTTP OpenAI, HTTP Anthropic, MCP —
-  same underlying failures, surface-appropriate presentation; propagate upstream
-  4xx statuses like 429 instead of blanket 500s)
+Every surface now derives its error response from a single
+`FoundryErrors.Classify(ex)` → `FoundryErrorInfo(Status, AnthropicType,
+OpenAiType, Message)`, so the same underlying failure looks consistent everywhere
+and upstream statuses are propagated instead of collapsing to a blanket 500:
+
+- Status mapping: 400 → `invalid_request_error`; 401 → `authentication_error`;
+  403 → `permission_error` (was flattened to 401); 404 → `not_found_error` /
+  `invalid_request_error` with a message pointing at
+  `Foundry__Endpoint`/`Foundry__Deployment` (was a generic 500 — a wrong
+  deployment name now reads as what it is); 413 → `request_too_large`; 429 →
+  `rate_limit_error` (Claude Code backs off properly on a real 429); upstream
+  5xx → 500 `api_error` marked as upstream/transient. Credential-layer failures
+  keep their Phase 5/8 classified messages.
+- Upstream 4xx detail (the service's own API error text, never a stack trace) is
+  surfaced trimmed to 300 chars — a 400 now tells the caller *what* was invalid.
+- Applied uniformly: `/v1/chat/completions` (OpenAI `error.type`), bridge
+  `/v1/messages` (Anthropic `error.type`), streaming bridge (pre-start JSON
+  errors + mid-stream SSE `error` events), API-detection failures, passthrough
+  pre-upstream failures, MCP `ask_foundry` (message only), and the `launch`
+  warm-up. Passthrough upstream errors remain verbatim (already Anthropic-shaped).
+- 10 new tests (57 total). The fake Foundry gained a `missing404` deployment-name
+  trigger returning Azure's real `DeploymentNotFound` shape for end-to-end
+  verification of the mapping.
+
+## Phase 12 — Polish (remaining)
+
 - SSE streaming for the OpenAI-shaped `/v1/chat/completions` surface (its `stream`
   flag is currently ignored)
 - Reverse bridge (OpenAI-shaped `/v1/chat/completions` → native Anthropic

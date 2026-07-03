@@ -28,6 +28,18 @@ async Task Handle(HttpContext http)
     File.WriteAllText(Path.Combine(logDir, $"{n:D3}-request.json"),
         $"{http.Request.Method} {http.Request.Path}{http.Request.QueryString}\n{body}");
 
+    // Error-parity simulation: a deployment name containing "missing404" gets the
+    // real Azure DeploymentNotFound shape, so status mapping is testable end to end.
+    if (http.Request.Path.Value?.Contains("missing404") == true)
+    {
+        http.Response.StatusCode = 404;
+        await http.Response.WriteAsJsonAsync(new
+        {
+            error = new { code = "DeploymentNotFound", message = "The API deployment for this resource does not exist." }
+        });
+        return;
+    }
+
     using var doc = JsonDocument.Parse(body);
     string? lastToolContent = null;
     if (doc.RootElement.TryGetProperty("messages", out var messages))

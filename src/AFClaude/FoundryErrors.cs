@@ -4,8 +4,47 @@ using Azure.Identity;
 
 namespace AFClaude;
 
+// One classified error: the HTTP status to return, the error `type` string for each
+// wire shape (Anthropic /v1/messages vs OpenAI /v1/chat/completions), and the
+// user-facing message. All surfaces derive their responses from this so the same
+// underlying failure looks consistent everywhere.
+internal readonly record struct FoundryErrorInfo(int Status, string AnthropicType, string OpenAiType, string Message);
+
 internal static class FoundryErrors
 {
+    public static FoundryErrorInfo Classify(Exception ex)
+    {
+        // Credential-layer failures have no HTTP status of their own.
+        if (ex is CredentialUnavailableException or AuthenticationFailedException)
+        {
+            return new(401, "authentication_error", "authentication_error", Describe(ex));
+        }
+
+        return HttpStatus(ex) switch
+        {
+            401 => new(401, "authentication_error", "authentication_error", Describe(ex)),
+            403 => new(403, "permission_error", "permission_error", Describe(ex)),
+            404 => new(404, "not_found_error", "invalid_request_error",
+                "The Foundry resource or deployment was not found (HTTP 404) — check Foundry__Endpoint and Foundry__Deployment." + Detail(ex)),
+            400 => new(400, "invalid_request_error", "invalid_request_error",
+                "Azure rejected the request as invalid (HTTP 400)." + Detail(ex)),
+            413 => new(413, "request_too_large", "invalid_request_error",
+                "The request was too large for the deployment (HTTP 413)." + Detail(ex)),
+            429 => new(429, "rate_limit_error", "rate_limit_error",
+                "The deployment is rate-limiting requests (HTTP 429) — retry with backoff." + Detail(ex)),
+            >= 500 and var upstream => new(500, "api_error", "server_error",
+                $"Azure returned an upstream error (HTTP {upstream}). This is usually transient — retry."),
+            _ => new(500, "api_error", "server_error", Describe(ex)),
+        };
+    }
+
+    // Upstream 4xx messages are the service's own API error text (never a stack
+    // trace), and they usually name the actual problem — worth surfacing, trimmed.
+    private static string Detail(Exception ex)
+        => string.IsNullOrWhiteSpace(ex.Message)
+            ? string.Empty
+            : $" Upstream detail: {(ex.Message.Length > 300 ? ex.Message[..300] + "…" : ex.Message)}";
+
     // Real-Foundry testing showed "your session may have expired" firing for two
     // failures that are NOT expired sessions: az CLI startup exceeding the credential's
     // ProcessTimeout, and a missing data-plane RBAC role (valid token, 401/403 from the

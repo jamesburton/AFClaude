@@ -28,7 +28,7 @@ internal sealed class FoundryTools(AIAgent agent, FoundryClient foundry, ILogger
         catch (Exception ex)
         {
             logger.LogError(ex, "ask_foundry failed");
-            return FoundryErrors.Describe(ex);
+            return FoundryErrors.Classify(ex).Message;
         }
     }
 }

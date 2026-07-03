@@ -73,6 +73,62 @@ public class FoundryErrorsTests
         Assert.False(FoundryErrors.IsAuthFailure(ex));
     }
 
+    // Error-surface parity: every surface derives status + wire-shape type + message
+    // from Classify, so the same failure looks consistent everywhere.
+    [Theory]
+    [InlineData(400, 400, "invalid_request_error", "invalid_request_error")]
+    [InlineData(403, 403, "permission_error", "permission_error")]
+    [InlineData(404, 404, "not_found_error", "invalid_request_error")]
+    [InlineData(413, 413, "request_too_large", "invalid_request_error")]
+    [InlineData(429, 429, "rate_limit_error", "rate_limit_error")]
+    [InlineData(503, 500, "api_error", "server_error")]
+    public void Classify_MapsUpstreamStatusToBothWireShapes(
+        int upstream, int expectedStatus, string anthropicType, string openAiType)
+    {
+        var info = FoundryErrors.Classify(new RequestFailedException(upstream, "boom"));
+
+        Assert.Equal(expectedStatus, info.Status);
+        Assert.Equal(anthropicType, info.AnthropicType);
+        Assert.Equal(openAiType, info.OpenAiType);
+        Assert.NotEmpty(info.Message);
+    }
+
+    [Fact]
+    public void Classify_UpstreamDetailIsSurfacedForClientErrors()
+    {
+        var info = FoundryErrors.Classify(new RequestFailedException(400, "max_tokens exceeds model limit"));
+
+        Assert.Contains("max_tokens exceeds model limit", info.Message);
+    }
+
+    [Fact]
+    public void Classify_NotFound_PointsAtConfiguration()
+    {
+        var info = FoundryErrors.Classify(new RequestFailedException(404, "DeploymentNotFound"));
+
+        Assert.Contains("Foundry__Deployment", info.Message);
+    }
+
+    [Fact]
+    public void Classify_CredentialFailures_Are401WithClassifiedMessage()
+    {
+        var info = FoundryErrors.Classify(new CredentialUnavailableException("no az"));
+
+        Assert.Equal(401, info.Status);
+        Assert.Equal("authentication_error", info.AnthropicType);
+        Assert.Contains("Install the Azure CLI", info.Message);
+    }
+
+    [Fact]
+    public void Classify_UnknownException_IsGeneric500()
+    {
+        var info = FoundryErrors.Classify(new InvalidOperationException("weird"));
+
+        Assert.Equal(500, info.Status);
+        Assert.Equal("api_error", info.AnthropicType);
+        Assert.Equal("server_error", info.OpenAiType);
+    }
+
     [Fact]
     public async Task CachingTokenCredential_AcquiresOnceWhileFresh()
     {

@@ -311,6 +311,91 @@ and repeat 7b. PASS: `OpenAI-compatible deployment — /v1/messages bridges ...`
 detection line, and `PROBE-VALUE-12345` printed (this validates the Phase 8.2
 trailing-system-role fix against the real model).
 
+## Stage 8 — Interactive Foundry picker (`launch`/`--http`, no config present)
+
+Context: when `Foundry__Endpoint`/`Foundry__Deployment` are unset and no saved
+`afclaude.config.json` exists, `launch`/`--http` now offer an interactive
+az-driven subscription -> resource -> deployment picker, but **only when a real
+terminal is attached** (no TTY -> falls through to the existing fail-fast
+behaviour from Stage 1). New flags: `--select`/`--configure` force the picker
+to run even when a saved config already exists; `--config <file>` points at a
+custom saved-config path and fails fast with `Missing Config <file>` if that
+file is named explicitly and does not exist.
+
+**This stage must be run from a real interactive terminal** (not a redirected/
+non-TTY session, not `Start-Job`) with `az login` already completed. Unlike
+every other stage in this file it cannot be scripted end-to-end — each step
+below requires a human to watch the prompts and choose an answer.
+
+**8a — picker appears (or is silently skipped) on a clean run:**
+
+```powershell
+$env:Foundry__Endpoint = ""; $env:Foundry__Deployment = ""
+Remove-Item -Path .\afclaude.config.json -ErrorAction SilentlyContinue
+dotnet run -- launch --version
+```
+
+PASS: the subscription, resource, and deployment prompts appear in turn; a
+prompt is silently skipped (no question asked, no pause) whenever there is
+exactly one candidate of that kind. Record which prompts appeared vs. were
+skipped, and how many candidates existed at each level.
+
+**8b — resolved Endpoint/Deployment pair looks correct:**
+
+After completing the picker in 8a, confirm the resolved
+`Foundry__Endpoint`/`Foundry__Deployment` pair (printed or written to config)
+matches the subscription/resource/deployment actually selected — same
+resource name, same endpoint host shape (see Stage 0's endpoint-shape note),
+same deployment name (not base model name).
+
+PASS: resolved Endpoint/Deployment matches what was selected in the picker,
+with no silent substitution of a different resource/deployment.
+
+**8c — API-surface probe matches independent knowledge:**
+
+Confirm the picker's API-surface probe result (`anthropic` vs `openai`) for
+the selected deployment matches what is independently known about that
+deployment (e.g. a `claude-*` deployment should probe as `anthropic`; a
+`gpt-*` deployment should probe as `openai`).
+
+PASS: probed API surface matches the deployment's known model family.
+
+**8d — save to file, then silent reload:**
+
+When prompted after 8a/8b/8c, choose **"Save to file"**.
+
+PASS (save): `afclaude.config.json` is written in the current directory
+containing the expected `Endpoint`/`Deployment`/`Api` fields matching the
+picker's selections.
+
+```powershell
+dotnet run -- launch --version
+```
+
+PASS (reload): the picker does **not** re-run — the saved config is loaded
+silently and `launch --version` proceeds straight to printing the claude
+version.
+
+**8e — `--select` forces the picker even with a saved config:**
+
+```powershell
+dotnet run -- launch --select --version
+```
+
+PASS: the full picker (subscription/resource/deployment prompts, or silent
+skips per the same single-candidate rule as 8a) re-runs despite
+`afclaude.config.json` existing from 8d. (`--configure` is an alias for
+`--select` — spot-check it behaves identically if time permits.)
+
+**8f — `--config` with a missing file fails fast:**
+
+```powershell
+dotnet run -- launch --config missing-file.json --version
+```
+
+PASS: fails fast with the error text `Missing Config missing-file.json`
+(exact text) — no picker, no hang, no stack-trace-only exit.
+
 ## Troubleshooting
 
 | Symptom | Meaning / action |
@@ -337,6 +422,12 @@ Stage 5 MCP ask_foundry:                   PASS/FAIL
 Stage 6a launch --version:                 PASS/FAIL
 Stage 6b launch -p text:                   PASS/FAIL   (API-key placeholder assumption held? Y/N)
 Stage 6c launch -p tool use:               PASS/FAIL
+Stage 8a picker appears/skips correctly:   PASS/FAIL   (prompts shown vs skipped: __)
+Stage 8b resolved Endpoint/Deployment ok:  PASS/FAIL
+Stage 8c API-surface probe correct:        PASS/FAIL
+Stage 8d save + silent reload:             PASS/FAIL
+Stage 8e --select re-runs picker:          PASS/FAIL
+Stage 8f --config missing-file fails fast: PASS/FAIL
 count_tokens 404 seen?                     Y/N
 Any expired-session auth message observed? (verbatim if so)
 Anomalies / verbatim errors:

@@ -27,6 +27,15 @@ static async Task RunMcpAsync(string[] args)
     // Stdio transport uses stdout exclusively for JSON-RPC; all logs must go to stderr.
     builder.Logging.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Trace);
 
+    // interactiveAllowed: false -- MCP mode never has an operator present (Claude
+    // launches it silently), so it can only passively load a saved config file, never
+    // run the wizard.
+    var mcpOverrides = await ResolveFoundryConfigOverridesAsync(builder.Configuration, args, interactiveAllowed: false);
+    if (mcpOverrides.Count > 0)
+    {
+        builder.Configuration.AddInMemoryCollection(mcpOverrides);
+    }
+
     var foundry = FoundryClientFactory.Create(builder.Configuration);
     AIAgent agent = foundry.ChatClient.AsAIAgent(
         instructions: "You are a local proxy agent. Preserve the caller's intent.");
@@ -44,7 +53,12 @@ static async Task RunMcpAsync(string[] args)
 // OpenAI-compatible HTTP proxy — secondary path for other OpenAI-compatible clients.
 static async Task RunHttpAsync(string[] args)
 {
-    var app = BuildHttpApp(args);
+    var envConfig = new ConfigurationBuilder().AddEnvironmentVariables().Build();
+    var httpOverrides = await ResolveFoundryConfigOverridesAsync(envConfig, args, interactiveAllowed: true);
+    var foundry = FoundryClientFactory.Create(
+        new ConfigurationBuilder().AddEnvironmentVariables().AddInMemoryCollection(httpOverrides).Build());
+
+    var app = BuildHttpApp(args, foundry: foundry);
     await app.RunAsync();
 }
 
@@ -53,7 +67,9 @@ static async Task RunHttpAsync(string[] args)
 // and execs `claude` in the foreground with the remaining args forwarded to it.
 static async Task RunLaunchAsync(string[] claudeArgs)
 {
-    var config = new ConfigurationBuilder().AddEnvironmentVariables().Build();
+    var envConfig = new ConfigurationBuilder().AddEnvironmentVariables().Build();
+    var launchOverrides = await ResolveFoundryConfigOverridesAsync(envConfig, claudeArgs, interactiveAllowed: true);
+    var config = new ConfigurationBuilder().AddEnvironmentVariables().AddInMemoryCollection(launchOverrides).Build();
     var foundry = FoundryClientFactory.Create(config); // fail fast before starting anything
     var deployment = foundry.Deployment;
 
@@ -87,7 +103,7 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     }
 
     var psi = new ProcessStartInfo("claude") { UseShellExecute = false };
-    foreach (var a in LaunchArgs.Translate(claudeArgs))
+    foreach (var a in LaunchArgs.Translate(CliArgs.StripAfClaudeFlags(claudeArgs)))
     {
         psi.ArgumentList.Add(a);
     }
@@ -111,6 +127,56 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     await claude.WaitForExitAsync();
     await app.StopAsync();
     Environment.ExitCode = claude.ExitCode;
+}
+
+// Resolves Foundry:Endpoint/Deployment/Api ahead of FoundryClientFactory.Create: env
+// vars always win; otherwise an explicit/default saved config file; otherwise (only
+// when interactiveAllowed and a real terminal is attached) the interactive picker.
+// Returns overrides to layer on top of the caller's configuration -- never touches a
+// key the caller's configuration already has a non-empty value for.
+static async Task<Dictionary<string, string?>> ResolveFoundryConfigOverridesAsync(
+    IConfiguration configuration, string[] args, bool interactiveAllowed)
+{
+    var overrides = new Dictionary<string, string?>();
+    var selectRequested = CliArgs.HasSelectFlag(args);
+    var explicitConfigPath = CliArgs.GetConfigPath(args);
+
+    var hasEndpoint = !string.IsNullOrWhiteSpace(configuration["Foundry:Endpoint"]);
+    var hasDeployment = !string.IsNullOrWhiteSpace(configuration["Foundry:Deployment"]);
+    if (!selectRequested && hasEndpoint && hasDeployment)
+    {
+        return overrides; // nothing to resolve -- env vars/appsettings already cover it
+    }
+
+    // --select always re-runs the wizard, ignoring any existing saved config file
+    // (this doubles as the "reset" case without needing a second flag).
+    var resolved = selectRequested ? null : FoundryConfigFile.TryLoad(explicitConfigPath);
+
+    if (resolved is null)
+    {
+        if (!interactiveAllowed || Console.IsInputRedirected || Console.IsOutputRedirected)
+        {
+            return overrides; // let FoundryClientFactory.Create's existing fail-fast fire
+        }
+
+        var suggestedFileName = explicitConfigPath ?? FoundryConfigFile.DefaultFileName;
+        var timeoutSeconds = configuration.GetValue<int?>("Foundry:CliTimeoutSeconds") ?? 60;
+        resolved = await FoundryConfigWizard.RunAsync(timeoutSeconds, suggestedFileName, CancellationToken.None);
+    }
+
+    if (!hasEndpoint)
+    {
+        overrides["Foundry:Endpoint"] = resolved.Endpoint;
+    }
+    if (!hasDeployment)
+    {
+        overrides["Foundry:Deployment"] = resolved.Deployment;
+    }
+    if (string.IsNullOrWhiteSpace(configuration["Foundry:Api"]))
+    {
+        overrides["Foundry:Api"] = resolved.Api;
+    }
+    return overrides;
 }
 
 static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, FoundryClient? foundry = null)

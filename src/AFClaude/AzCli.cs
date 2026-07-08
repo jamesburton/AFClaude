@@ -68,31 +68,34 @@ internal static class AzCli
             throw new AzCliException("Azure CLI ('az') was not found on PATH. Install it and run 'az login'.", ex);
         }
 
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
-
-        string stdout;
-        string stderr;
-        try
+        using (process)
         {
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(linked.Token);
-            var stderrTask = process.StandardError.ReadToEndAsync(linked.Token);
-            await process.WaitForExitAsync(linked.Token);
-            stdout = await stdoutTask;
-            stderr = await stderrTask;
-        }
-        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
-        {
-            TryKill(process);
-            throw new AzCliException($"Timed out waiting for 'az {arguments}' after {timeoutSeconds}s.");
-        }
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
-        if (process.ExitCode != 0)
-        {
-            throw ClassifyFailure(arguments, stderr);
-        }
+            string stdout;
+            string stderr;
+            try
+            {
+                var stdoutTask = process.StandardOutput.ReadToEndAsync(linked.Token);
+                var stderrTask = process.StandardError.ReadToEndAsync(linked.Token);
+                await process.WaitForExitAsync(linked.Token);
+                stdout = await stdoutTask;
+                stderr = await stderrTask;
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+            {
+                TryKill(process);
+                throw new AzCliException($"Timed out waiting for 'az {arguments}' after {timeoutSeconds}s.");
+            }
 
-        return stdout;
+            if (process.ExitCode != 0)
+            {
+                throw ClassifyFailure(arguments, stderr);
+            }
+
+            return stdout;
+        }
     }
 
     // Exposed internally (not private) so the classification rule is unit-testable

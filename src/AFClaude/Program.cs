@@ -96,7 +96,7 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     var configuredPort = config.GetValue<int?>("AFClaude:Launch:Port") ?? config.GetValue<int?>("Launch:Port");
     var bindUrl = $"http://127.0.0.1:{configuredPort ?? 0}";
 
-    var app = BuildHttpApp([], bindUrl, foundry);
+    var app = BuildHttpApp([], bindUrl, foundry, quietLogging: true);
     try
     {
         await app.StartAsync();
@@ -245,12 +245,26 @@ static async Task<WebApplication> BuildHttpAppAsync(string[] args)
     return BuildHttpApp(args, foundry: foundry, prebuiltBuilder: builder);
 }
 
-static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, FoundryClient? foundry = null, WebApplicationBuilder? prebuiltBuilder = null)
+static WebApplication BuildHttpApp(
+    string[] args, string? bindUrl = null, FoundryClient? foundry = null,
+    WebApplicationBuilder? prebuiltBuilder = null, bool quietLogging = false)
 {
     var builder = prebuiltBuilder ?? WebApplication.CreateBuilder(args);
     if (bindUrl is not null)
     {
         builder.WebHost.UseUrls(bindUrl);
+    }
+
+    // launch mode hands the console over to `claude`'s TUI once it spawns; any of our
+    // own logging (Kestrel's startup banner, or per-request notices like the
+    // anthropic-beta strip notice) interleaves with and corrupts the TUI's rendering,
+    // regardless of stdout vs stderr -- both share the same terminal. Clean, classified
+    // errors still reach the caller through the actual API responses (see
+    // FoundryErrors), so nothing user-facing is lost; use AFClaude__TraceDir for
+    // wire-level diagnosis instead of console logs in this mode.
+    if (quietLogging)
+    {
+        builder.Logging.ClearProviders();
     }
 
     foundry ??= FoundryClientFactory.Create(builder.Configuration);

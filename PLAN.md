@@ -661,6 +661,33 @@ tested — `Program.cs`'s top-level orchestration has never had direct unit test
 (only the components it wires together do); this class of behavior is verified
 manually, consistent with the rest of this file's `launch`/`--http` stages.
 
+## Phase 13.2 — `launch` mode's console logging corrupted claude's TUI — DONE
+
+**Real defect (v0.5.1, user's own machine):** after the port fix above, `launch`
+successfully started and spawned `claude`, but AFClaude's own ASP.NET Core console
+logging (Kestrel's startup banner, and per-request `ILogger` notices like the
+`anthropic-beta` strip notice) kept writing to the console after `claude`'s TUI took
+it over. `claude` is spawned via `Process.Start` with no stdio redirection, so it
+shares the parent console directly — any further writes from AFClaude, on either
+stdout or stderr, interleave with and visually corrupt the TUI.
+
+Fix: `BuildHttpApp` gained a `quietLogging` parameter; `launch` mode passes
+`quietLogging: true`, which calls `builder.Logging.ClearProviders()` so no framework
+or application `ILogger` output reaches the console once Kestrel is up. The explicit
+startup banner lines (`Console.Error.WriteLine` in `RunLaunchAsync` — "Acquiring
+Azure token...", "AFClaude proxy listening...", the detected-API-surface line) are
+untouched, since they're plain console writes outside the logging pipeline and all
+happen *before* `claude` spawns, matching the same "belongs to the TUI once it's
+running" boundary as the port fix above. `--http` mode keeps normal console logging
+(quietLogging defaults to `false`) since nothing else owns that terminal. Classified
+errors still reach the caller through the actual API responses (`FoundryErrors`), not
+console logs, so no user-facing diagnostic value is lost; `AFClaude__TraceDir` remains
+available for wire-level diagnosis.
+
+Verified: `dotnet build`/`dotnet test` (87 tests) green. Not independently unit
+tested, consistent with Phase 13.1 — this is `Program.cs` top-level orchestration,
+verified manually via TESTING.md's `launch` stages.
+
 ## Explicitly out of scope for now
 
 - Multi-deployment / multi-model routing (single `Foundry:Deployment` only)

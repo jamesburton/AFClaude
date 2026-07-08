@@ -600,6 +600,39 @@ and upstream statuses are propagated instead of collapsing to a blanket 500:
 - Other OpenAI-only hosts (e.g. Ollama) via `Foundry__Api=openai` + non-Azure
   auth — needs an auth-mode option (the current path always uses `AzureCliCredential`)
 
+## Phase 13 — Interactive Azure Foundry picker — DONE
+
+**Origin:** finding the right `Foundry__Endpoint`/`Foundry__Deployment` values required
+manually running `az cognitiveservices account list`/`az cognitiveservices account
+deployment list` and reading JSON. `launch` and `--http` now offer an interactive
+Spectre.Console picker instead when those env vars (and no saved config file) are
+present, walking subscription → resource → deployment via `az`, probing the API
+surface (same logic as `Foundry__Api=auto`), and optionally persisting the result to a
+local `afclaude.config.json` (or a `--config`-specified path).
+
+- `AzCli.cs`: typed `az ... -o json` shelling (subscriptions, Cognitive Services
+  accounts filtered to `AIServices`/`OpenAI` kind, deployments), with error
+  classification for "az not installed" / "not logged in" / timeout.
+- `FoundryConfigFile.cs`: the saved-config JSON model and load/save. An explicitly
+  named `--config <file>` that doesn't exist is a hard failure (`Missing Config
+  <file>`); the default `afclaude.config.json` simply not existing yet is not an
+  error. Env vars always outrank a saved file for any key they set.
+- `CliArgs.cs`: `--select`/`--configure` (force the picker now — this also covers
+  "reset" when a saved file already exists, since it's ignored) and `--config <file>`.
+- `FoundryConfigWizard.cs`: the Spectre.Console selection flow — single-item stages
+  skip the prompt automatically; the save prompt offers "Save to file" (editable
+  filename, default suggested) or "Don't save".
+- The interactive picker only ever runs in `launch`/`--http` modes, and only when a
+  real terminal is attached (`Console.IsInputRedirected`/`IsOutputRedirected` both
+  false) — never in MCP stdio mode, whose stdout is reserved for JSON-RPC and which
+  Claude launches with no operator present. MCP mode still passively loads a saved
+  config file if one exists.
+- Exit criteria — verified: unit tests for JSON deserialization against real `az`
+  output shapes, config-file load/save/precedence, CLI flag parsing, and the pure
+  selection/save logic (via `Spectre.Console.Testing`'s `TestConsole`) all pass. A
+  manual walkthrough against a real `az login` session (TESTING.md) confirms the live
+  subscription → resource → deployment flow end to end.
+
 ## Explicitly out of scope for now
 
 - Multi-deployment / multi-model routing (single `Foundry:Deployment` only)

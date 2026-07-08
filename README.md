@@ -74,6 +74,34 @@ Set via environment variables (or `appsettings.json` / `dotnet user-secrets` loc
 | `Foundry__CliTimeoutSeconds` | `60` (default)                              | How long to wait for the `az` CLI to produce a token. The Azure SDK default (13s) is too short for a cold `az` start on slow or loaded machines (14–24s observed) — AFClaude defaults to 60; raise it if you still see token-timeout errors. |
 | `AFClaude__TraceDir`  | *(unset)*                                          | Opt-in wire tracing for `/v1/messages`: dumps each request's raw Anthropic body, translated Azure request, Azure response, and the reply to numbered files in this directory. For diagnosing translation/model issues. **Traces contain full conversation content** — use a private directory and delete afterwards. |
 
+### Interactive setup (`launch` / `--http` only)
+
+If `Foundry__Endpoint`/`Foundry__Deployment` aren't set (and no saved config file is
+found — see below), `launch` and `--http` mode drop into an interactive picker
+(`az account list` → `az cognitiveservices account list` → `az cognitiveservices
+account deployment list`) instead of failing fast, as long as a real terminal is
+attached (it never triggers under a redirected stdin/stdout, and never in the default
+MCP stdio mode — Claude launches that one with no operator present). After picking a
+deployment it probes which API surface it answers on (same logic as `Foundry__Api=auto`)
+and offers to save the result.
+
+| Flag | Effect |
+|---|---|
+| `--select` / `--configure` | Force the interactive picker to run now, regardless of env vars or an existing saved config file. |
+| `--config <file>` | Load Foundry config from `<file>` instead of the default `afclaude.config.json` in the current directory. Fails fast with `Missing Config <file>` if it doesn't exist. Also used as the suggested save-target filename when the picker runs. |
+
+Saved config files are plain JSON:
+
+```json
+{
+  "Endpoint": "https://<resource>.cognitiveservices.azure.com/",
+  "Deployment": "<deployment-name>",
+  "Api": "anthropic"
+}
+```
+
+Env vars always take priority over a saved config file for any key they set.
+
 No API keys are configured — auth is entirely via `AzureCliCredential` (falls back to
 other `DefaultAzureCredential` sources if you later want that instead).
 

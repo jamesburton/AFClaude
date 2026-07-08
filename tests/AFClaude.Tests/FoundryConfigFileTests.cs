@@ -2,6 +2,17 @@ using AFClaude;
 
 namespace AFClaude.Tests;
 
+// Tests in this collection mutate the process-global Directory.CurrentDirectory (to
+// sandbox file I/O in a temp dir), so they must not run in parallel with each other —
+// xUnit parallelizes across distinct test classes by default, and two classes racing to
+// set/restore CurrentDirectory nondeterministically stomp on one another's directory.
+[CollectionDefinition(Name)]
+public class CurrentDirectoryTestCollection
+{
+    public const string Name = "Mutates Directory.CurrentDirectory";
+}
+
+[Collection(CurrentDirectoryTestCollection.Name)]
 public class FoundryConfigFileTests : IDisposable
 {
     private readonly string _tempDir = Directory.CreateTempSubdirectory("afclaude-config-tests-").FullName;

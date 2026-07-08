@@ -54,4 +54,17 @@ public class CliArgsTests
 
         Assert.Equal(args, CliArgs.StripAfClaudeFlags(args));
     }
+
+    [Fact]
+    public void StripAfClaudeFlags_KnownLimitation_ExactMatchValueIsAlsoStripped()
+    {
+        // Documents a known, accepted edge case: -p "--select" is indistinguishable from
+        // the actual --select flag by whole-argument matching. Real collisions are very
+        // unlikely (a prompt string that IS exactly "--select"), and correctly scoping
+        // this would require knowing which positions are flags vs values, which isn't
+        // available here.
+        string[] args = ["-p", "--select"];
+
+        Assert.Equal(["-p"], CliArgs.StripAfClaudeFlags(args));
+    }
 }

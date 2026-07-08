@@ -1,7 +1,10 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Net.Sockets;
 using System.Text.Json;
 using AFClaude;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Agents.AI;
 using OpenAI.Chat;
 
@@ -54,7 +57,17 @@ static async Task RunMcpAsync(string[] args)
 static async Task RunHttpAsync(string[] args)
 {
     var app = await BuildHttpAppAsync(args);
-    await app.RunAsync();
+    try
+    {
+        await app.RunAsync();
+    }
+    catch (SocketException ex)
+    {
+        throw new InvalidOperationException(
+            $"Could not bind the HTTP proxy ({ex.SocketErrorCode}). The configured address/port may be reserved by " +
+            "Windows or already in use by another process -- pass a different address via --urls or ASPNETCORE_URLS.",
+            ex);
+    }
 }
 
 // launch: starts the HTTP host on a known local port, points Claude Code's own
@@ -73,12 +86,36 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     var foundry = FoundryClientFactory.Create(config); // fail fast before starting anything
     var deployment = foundry.Deployment;
 
-    // Both spellings: AFClaude__Launch__Port (documented) and Launch__Port.
-    var port = config.GetValue<int?>("AFClaude:Launch:Port") ?? config.GetValue<int?>("Launch:Port") ?? 31337;
-    var baseUrl = $"http://127.0.0.1:{port}";
+    // Both spellings: AFClaude__Launch__Port (documented) and Launch__Port. Unset ->
+    // bind to port 0 (OS-assigned) rather than a fixed default: Windows reserves
+    // arbitrary TCP port ranges per machine/reboot (observed live: Hyper-V/WSL NAT
+    // exclusions covering e.g. 31291-31390, which silently ate the old hardcoded 31337
+    // default with a raw SocketException). Letting the OS pick sidesteps that whole
+    // class of failure; only an explicit override can still collide, in which case we
+    // fail with a clean message instead of the raw exception.
+    var configuredPort = config.GetValue<int?>("AFClaude:Launch:Port") ?? config.GetValue<int?>("Launch:Port");
+    var bindUrl = $"http://127.0.0.1:{configuredPort ?? 0}";
 
-    var app = BuildHttpApp([], baseUrl, foundry);
-    await app.StartAsync();
+    var app = BuildHttpApp([], bindUrl, foundry);
+    try
+    {
+        await app.StartAsync();
+    }
+    catch (SocketException ex)
+    {
+        await app.StopAsync();
+        throw configuredPort is int explicitPort
+            ? new InvalidOperationException(
+                $"Could not bind the local proxy to port {explicitPort} ({ex.SocketErrorCode}), set via " +
+                "AFClaude__Launch__Port/Launch__Port. The port may be reserved by Windows or already in use -- " +
+                "pick a different port, or unset the variable to let AFClaude choose a free one automatically.",
+                ex)
+            : new InvalidOperationException(
+                $"Could not bind the local proxy to an OS-assigned port ({ex.SocketErrorCode}).", ex);
+    }
+
+    // Read back the actual bound address -- port 0 above means Kestrel chose it.
+    var baseUrl = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
     Console.Error.WriteLine($"AFClaude proxy listening on {baseUrl} (Foundry deployment: {deployment})");
 
     // Warm the Entra token before claude's first request: a cold `az` start can take

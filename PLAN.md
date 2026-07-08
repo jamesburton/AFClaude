@@ -633,6 +633,34 @@ local `afclaude.config.json` (or a `--config`-specified path).
   manual walkthrough against a real `az login` session (TESTING.md) confirms the live
   subscription → resource → deployment flow end to end.
 
+## Phase 13.1 — `launch` mode's fixed port defect — DONE
+
+**Real defect (v0.5.0, user's own machine):** `launch` mode's hardcoded default port
+31337 hit a Windows-reserved TCP exclusion range and failed with a raw
+`SocketException 10013` instead of starting. Confirmed live via
+`netsh interface ipv4 show excludedportrange protocol=tcp`, which showed
+`31291-31390` excluded (alongside several other ranges) — these are per-machine,
+per-reboot reservations (Hyper-V/WSL NAT), so no single hardcoded port is reliably
+free across machines, and picking a different fixed default would only move the bug.
+
+Fix: when `AFClaude__Launch__Port`/`Launch__Port` isn't set, `launch` mode now binds
+Kestrel to port 0 (OS-assigned) instead of a fixed default, then reads back the real
+bound address via `IServerAddressesFeature` for both the startup log line and the
+`ANTHROPIC_BASE_URL` passed to `claude` — sidestepping the whole class of
+reserved-port failures rather than retrying a list of guesses. An explicit port
+override can still collide; that case now fails with a clean, classified
+`InvalidOperationException` (naming the offending env var and suggesting unsetting
+it) instead of a raw stack trace. `--http` mode's bind failures are wrapped the same
+way, though it keeps its existing fixed/configurable address by design (external
+tools need a predictable URL to point at).
+
+Verified: standalone repro confirmed `UseUrls("http://127.0.0.1:0")` +
+`IServerAddressesFeature` correctly reports the OS-assigned port on this SDK; full
+`dotnet build`/`dotnet test` suite (87 tests) still green. Not independently unit
+tested — `Program.cs`'s top-level orchestration has never had direct unit tests
+(only the components it wires together do); this class of behavior is verified
+manually, consistent with the rest of this file's `launch`/`--http` stages.
+
 ## Explicitly out of scope for now
 
 - Multi-deployment / multi-model routing (single `Foundry:Deployment` only)

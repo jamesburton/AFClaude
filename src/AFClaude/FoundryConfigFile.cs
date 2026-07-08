@@ -40,7 +40,10 @@ internal static class FoundryConfigFile
 
     public static void Save(string path, FoundryConfig config)
     {
-        var options = new JsonSerializerOptions(JsonSerializerOptions.Web) { WriteIndented = true };
+        // PascalCase to match the documented config-file format (README.md); reads stay
+        // case-insensitive via JsonSerializerOptions.Web in TryLoad, so older/hand-edited
+        // lowercase files still load fine.
+        var options = new JsonSerializerOptions { WriteIndented = true };
         File.WriteAllText(path, JsonSerializer.Serialize(config, options));
     }
 }

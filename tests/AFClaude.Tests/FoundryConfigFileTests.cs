@@ -61,6 +61,17 @@ public class FoundryConfigFileTests : IDisposable
     }
 
     [Fact]
+    public void Save_WritesPascalCaseKeys()
+    {
+        FoundryConfigFile.Save(FoundryConfigFile.DefaultFileName, new FoundryConfig("https://example.com/", "gpt-4.1", "openai"));
+
+        var json = File.ReadAllText(FoundryConfigFile.DefaultFileName);
+        Assert.Contains("\"Endpoint\"", json);
+        Assert.Contains("\"Deployment\"", json);
+        Assert.Contains("\"Api\"", json);
+    }
+
+    [Fact]
     public void TryLoad_ExplicitPath_LoadsThatFileNotTheDefault()
     {
         var config = new FoundryConfig("https://explicit.example.com/", "explicit-deployment", "anthropic");

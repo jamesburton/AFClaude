@@ -107,6 +107,11 @@ internal static class AzCli
 
     // cmd.exe /c is required on Windows to resolve az.cmd (a batch-file shim) via
     // Process.Start without UseShellExecute; az itself isn't directly executable.
+    // `arguments` is interpolated into this single command string with no escaping:
+    // safe here because callers only ever build it from subscription IDs (GUIDs) and
+    // resource-group/account names (which Azure's own naming rules forbid shell
+    // metacharacters in), sourced from the operator's own authenticated `az` output --
+    // not from untrusted input.
     private static ProcessStartInfo BuildStartInfo(string arguments)
         => OperatingSystem.IsWindows()
             ? new ProcessStartInfo("cmd.exe") { ArgumentList = { "/c", $"az {arguments} -o json" } }

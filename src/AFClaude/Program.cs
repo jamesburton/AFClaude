@@ -53,12 +53,7 @@ static async Task RunMcpAsync(string[] args)
 // OpenAI-compatible HTTP proxy — secondary path for other OpenAI-compatible clients.
 static async Task RunHttpAsync(string[] args)
 {
-    var envConfig = new ConfigurationBuilder().AddEnvironmentVariables().Build();
-    var httpOverrides = await ResolveFoundryConfigOverridesAsync(envConfig, args, interactiveAllowed: true);
-    var foundry = FoundryClientFactory.Create(
-        new ConfigurationBuilder().AddEnvironmentVariables().AddInMemoryCollection(httpOverrides).Build());
-
-    var app = BuildHttpApp(args, foundry: foundry);
+    var app = await BuildHttpAppAsync(args);
     await app.RunAsync();
 }
 
@@ -69,7 +64,12 @@ static async Task RunLaunchAsync(string[] claudeArgs)
 {
     var envConfig = new ConfigurationBuilder().AddEnvironmentVariables().Build();
     var launchOverrides = await ResolveFoundryConfigOverridesAsync(envConfig, claudeArgs, interactiveAllowed: true);
-    var config = new ConfigurationBuilder().AddEnvironmentVariables().AddInMemoryCollection(launchOverrides).Build();
+    var configBuilder = new ConfigurationBuilder().AddEnvironmentVariables();
+    if (launchOverrides.Count > 0)
+    {
+        configBuilder.AddInMemoryCollection(launchOverrides);
+    }
+    var config = configBuilder.Build();
     var foundry = FoundryClientFactory.Create(config); // fail fast before starting anything
     var deployment = foundry.Deployment;
 
@@ -161,7 +161,18 @@ static async Task<Dictionary<string, string?>> ResolveFoundryConfigOverridesAsyn
 
         var suggestedFileName = explicitConfigPath ?? FoundryConfigFile.DefaultFileName;
         var timeoutSeconds = configuration.GetValue<int?>("Foundry:CliTimeoutSeconds") ?? 60;
-        resolved = await FoundryConfigWizard.RunAsync(timeoutSeconds, suggestedFileName, CancellationToken.None);
+        try
+        {
+            resolved = await FoundryConfigWizard.RunAsync(timeoutSeconds, suggestedFileName, CancellationToken.None);
+        }
+        catch (AzCliException)
+        {
+            throw; // already a clean, actionable message -- no reclassification needed
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(FoundryErrors.Classify(ex).Message, ex);
+        }
     }
 
     if (!hasEndpoint)
@@ -179,9 +190,27 @@ static async Task<Dictionary<string, string?>> ResolveFoundryConfigOverridesAsyn
     return overrides;
 }
 
-static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, FoundryClient? foundry = null)
+// --http mode specifically: resolve Foundry config against the FULL WebApplication
+// configuration stack (env vars, appsettings.json, command-line args, user-secrets),
+// not just env vars, so those documented sources keep working and the interactive
+// picker isn't spuriously triggered for someone relying on them. (launch mode has
+// always been env-vars-only, unrelated to this fix.)
+static async Task<WebApplication> BuildHttpAppAsync(string[] args)
 {
     var builder = WebApplication.CreateBuilder(args);
+    var overrides = await ResolveFoundryConfigOverridesAsync(builder.Configuration, args, interactiveAllowed: true);
+    if (overrides.Count > 0)
+    {
+        builder.Configuration.AddInMemoryCollection(overrides);
+    }
+
+    var foundry = FoundryClientFactory.Create(builder.Configuration);
+    return BuildHttpApp(args, foundry: foundry, prebuiltBuilder: builder);
+}
+
+static WebApplication BuildHttpApp(string[] args, string? bindUrl = null, FoundryClient? foundry = null, WebApplicationBuilder? prebuiltBuilder = null)
+{
+    var builder = prebuiltBuilder ?? WebApplication.CreateBuilder(args);
     if (bindUrl is not null)
     {
         builder.WebHost.UseUrls(bindUrl);

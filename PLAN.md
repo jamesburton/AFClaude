@@ -730,6 +730,25 @@ and [#46416](https://github.com/anthropics/claude-code/issues/46416), both open,
 tracking this exact gap. Nothing for AFClaude to do here; it's entirely client-side
 in Claude Code.
 
+## Phase 13.4 — persist `MaxTokensParam` per saved config — DONE
+
+**Origin:** the qhub-sweden Foundry resource has two `gpt-5.6` deployments (`terra`,
+`luna`, both requiring `Foundry__MaxTokensParam=new` per Phase 13.3) alongside Claude
+deployments that don't. Since AFClaude is single-deployment and the saved config file
+only carried `Endpoint`/`Deployment`/`Api`, switching between deployments meant
+re-setting an env var by hand every time.
+
+Fix: `FoundryConfig` gained a fourth field, `MaxTokensParam` (defaults to `legacy` —
+old 3-field saved files still deserialize correctly, verified by a regression test
+loading a hand-written 3-field JSON). `ResolveFoundryConfigOverridesAsync` now applies
+it the same way as `Api` (only when the caller's own configuration doesn't already
+have a non-empty value). The wizard doesn't ask about it interactively — it just
+defaults to `legacy` in wizard-saved configs, matching prior behaviour; users with a
+deployment that needs `new` set it by hand-editing the saved file or via the env var.
+
+Verified: 2 new tests (backward-compat load, explicit round-trip with `MaxTokensParam:
+"new"`); full suite (91 tests) green.
+
 ## Explicitly out of scope for now
 
 - Multi-deployment / multi-model routing (single `Foundry:Deployment` only)

@@ -2,10 +2,12 @@ using System.Text.Json;
 
 namespace AFClaude;
 
-// The three Foundry settings the interactive picker resolves and can persist. Api is
-// always a concrete value here ("anthropic"/"openai") — "auto" is never saved, since a
-// saved config exists specifically to skip the probe next time.
-internal sealed record FoundryConfig(string Endpoint, string Deployment, string Api);
+// The Foundry settings the interactive picker resolves and can persist. Api is always
+// a concrete value here ("anthropic"/"openai") — "auto" is never saved, since a saved
+// config exists specifically to skip the probe next time. MaxTokensParam defaults to
+// "legacy" so older 3-field saved config files (from before this field existed) still
+// deserialize correctly with today's default behaviour.
+internal sealed record FoundryConfig(string Endpoint, string Deployment, string Api, string MaxTokensParam = "legacy");
 
 internal static class FoundryConfigFile
 {

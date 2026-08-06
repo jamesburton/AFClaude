@@ -72,6 +72,32 @@ public class FoundryConfigFileTests : IDisposable
     }
 
     [Fact]
+    public void TryLoad_OldThreeFieldFile_DefaultsMaxTokensParamToLegacy()
+    {
+        // Locks in backward compatibility for config files saved before this field
+        // existed (e.g. the shape written by earlier AFClaude releases).
+        File.WriteAllText(FoundryConfigFile.DefaultFileName, """
+            {"Endpoint": "https://example.com/", "Deployment": "gpt-4.1", "Api": "openai"}
+            """);
+
+        var loaded = FoundryConfigFile.TryLoad(explicitPath: null);
+
+        Assert.Equal("legacy", loaded!.MaxTokensParam);
+    }
+
+    [Fact]
+    public void SaveThenLoad_RoundTripsExplicitMaxTokensParam()
+    {
+        var config = new FoundryConfig(
+            "https://qhub-sweden.cognitiveservices.azure.com/", "gpt-5.6-terra", "openai", "new");
+
+        FoundryConfigFile.Save(FoundryConfigFile.DefaultFileName, config);
+        var loaded = FoundryConfigFile.TryLoad(explicitPath: null);
+
+        Assert.Equal(config, loaded);
+    }
+
+    [Fact]
     public void TryLoad_ExplicitPath_LoadsThatFileNotTheDefault()
     {
         var config = new FoundryConfig("https://explicit.example.com/", "explicit-deployment", "anthropic");

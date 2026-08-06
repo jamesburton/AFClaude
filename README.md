@@ -97,9 +97,17 @@ Saved config files are plain JSON:
 {
   "Endpoint": "https://<resource>.cognitiveservices.azure.com/",
   "Deployment": "<deployment-name>",
-  "Api": "anthropic"
+  "Api": "anthropic",
+  "MaxTokensParam": "legacy"
 }
 ```
+
+`MaxTokensParam` is optional (defaults to `legacy` — see `Foundry__MaxTokensParam` above);
+older saved files without it still load fine. Keep multiple config files (one per
+deployment) and switch between them with `--config <file>` — useful when you have
+several deployments on the same resource with different requirements, e.g. a
+Claude deployment (`Api: anthropic`) alongside GPT-family deployments that need
+`MaxTokensParam: new`.
 
 Env vars always take priority over a saved config file for any key they set.
 

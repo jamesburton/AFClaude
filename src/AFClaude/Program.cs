@@ -224,6 +224,10 @@ static async Task<Dictionary<string, string?>> ResolveFoundryConfigOverridesAsyn
     {
         overrides["Foundry:Api"] = resolved.Api;
     }
+    if (string.IsNullOrWhiteSpace(configuration["Foundry:MaxTokensParam"]))
+    {
+        overrides["Foundry:MaxTokensParam"] = resolved.MaxTokensParam;
+    }
     return overrides;
 }
 

@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- AOAI001: SetNewMaxCompletionTokensPropertyEnabled (Foundry:MaxTokensParam=new) is marked experimental. -->
+    <NoWarn>$(NoWarn);AOAI001</NoWarn>
   </PropertyGroup>
 
   <PropertyGroup>

@@ -688,6 +688,48 @@ Verified: `dotnet build`/`dotnet test` (87 tests) green. Not independently unit
 tested, consistent with Phase 13.1 — this is `Program.cs` top-level orchestration,
 verified manually via TESTING.md's `launch` stages.
 
+## Phase 13.3 — bridge path needs `max_completion_tokens` for some deployments — DONE
+
+**Real defect (v0.5.2, user's own machine, a "Terra" OpenAI deployment):** the bridge
+path (`/v1/messages` on an OpenAI-compatible deployment) sends `max_tokens`, and this
+deployment rejected it: `400 unsupported_parameter — 'max_tokens' is not supported
+with this model. Use 'max_completion_tokens' instead.`
+
+Root cause, confirmed by decompiling the installed `Azure.AI.OpenAI` 2.9.0-beta.1
+assembly (`ilspycmd`) rather than guessing: `AzureChatClient` (the type
+`AzureOpenAIClient.GetChatClient(...)` returns) calls an internal
+`RefreshMaxTokenSerialization` before every request, which rewrites
+`ChatCompletionOptions.MaxOutputTokenCount`'s wire key back to the legacy `max_tokens`
+by default — most Azure deployments still expect that name, but this deployment
+apparently doesn't. The SDK does expose an (experimental, `AOAI001`) escape hatch:
+`AzureChatExtensions.SetNewMaxCompletionTokensPropertyEnabled(options, bool)`.
+Verified live via `ModelReaderWriter.Write` on a real options object that the flag
+correctly toggles the serialized key between `max_tokens` and `max_completion_tokens`.
+
+Fix: `Foundry__MaxTokensParam` = `legacy` (default, unchanged behaviour — `max_tokens`)
+| `new` (`max_completion_tokens`), parsed in `FoundryClientFactory.Create` and carried
+on the `FoundryClient` record, applied in `AnthropicBridge.ToOptions` by explicitly
+calling `SetNewMaxCompletionTokensPropertyEnabled` in **both** directions (not just for
+`new`) — relying on the SDK's own default rather than deciding explicitly would have
+worked here only by coincidence of an untouched `ChatCompletionOptions`'s patch state,
+which isn't a documented contract worth depending on silently. Only affects the
+OpenAI-bridge path; the native Anthropic passthrough never touches `ChatCompletionOptions`.
+
+Exit criteria — verified: 2 new unit tests assert the actual serialized wire key via
+`ModelReaderWriter.Write` for both `legacy` (default) and `new`; full suite (89 tests)
+green. `AOAI001` suppressed in the main project only (test project doesn't call the
+experimental API directly, only the public `ToOptions` wrapper).
+
+**Separately raised, no code change possible:** the user also asked whether Claude
+Code can be told a custom model's real context-window size when talking through a
+custom `ANTHROPIC_BASE_URL` (Claude Code otherwise assumes 200k for any model name it
+doesn't recognize, e.g. a Foundry deployment named "terra"). Researched directly
+against Claude Code's docs/source: **no such override exists today** — confirmed via
+[anthropics/claude-code#68522](https://github.com/anthropics/claude-code/issues/68522)
+and [#46416](https://github.com/anthropics/claude-code/issues/46416), both open,
+tracking this exact gap. Nothing for AFClaude to do here; it's entirely client-side
+in Claude Code.
+
 ## Explicitly out of scope for now
 
 - Multi-deployment / multi-model routing (single `Foundry:Deployment` only)

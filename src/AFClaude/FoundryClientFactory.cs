@@ -10,7 +10,8 @@ internal sealed record FoundryClient(
     FoundryAnthropicClient Anthropic,
     FoundryApiResolver Api,
     string Deployment,
-    TokenCredential Credential);
+    TokenCredential Credential,
+    bool UseMaxCompletionTokens);
 
 internal static class FoundryClientFactory
 {
@@ -78,10 +79,26 @@ internal static class FoundryClientFactory
         var bodyMode = configuration["Foundry:AnthropicBody"];
         bodyMode = string.IsNullOrWhiteSpace(bodyMode) ? FoundryAnthropicClient.BodyStrict : bodyMode.Trim();
 
+        // The Azure OpenAI SDK silently rewrites the modern `max_completion_tokens`
+        // field back to the legacy `max_tokens` before every request unless told
+        // otherwise (AzureChatClient.RefreshMaxTokenSerialization) -- most Azure
+        // deployments still expect the legacy name, but some newer/non-GPT-family
+        // deployments (observed live: a Terra deployment) reject `max_tokens` outright
+        // ("Use 'max_completion_tokens' instead"). legacy (default) keeps today's
+        // behaviour; new opts a deployment into the modern field name.
+        var maxTokensParamValue = configuration["Foundry:MaxTokensParam"]?.Trim().ToLowerInvariant();
+        var useMaxCompletionTokens = maxTokensParamValue switch
+        {
+            null or "" or "legacy" or "max_tokens" => false,
+            "new" or "max_completion_tokens" => true,
+            _ => throw new InvalidOperationException(
+                $"Invalid configuration 'Foundry:MaxTokensParam' value '{maxTokensParamValue}'. Use 'legacy' (default) or 'new'."),
+        };
+
         var azureClient = new AzureOpenAIClient(endpoint, credential);
         var anthropic = new FoundryAnthropicClient(SharedHttp, endpoint, deployment, credential, betaMode, bodyMode);
         var resolver = new FoundryApiResolver(configuredApi, anthropic.ProbeAsync);
-        return new FoundryClient(azureClient.GetChatClient(deployment), anthropic, resolver, deployment, credential);
+        return new FoundryClient(azureClient.GetChatClient(deployment), anthropic, resolver, deployment, credential, useMaxCompletionTokens);
     }
 }
 

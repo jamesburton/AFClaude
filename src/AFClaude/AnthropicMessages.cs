@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Azure.AI.OpenAI.Chat;
 using OpenAI.Chat;
 
 namespace AFClaude;
@@ -204,13 +205,20 @@ internal static class AnthropicBridge
         }
     }
 
-    public static ChatCompletionOptions ToOptions(AnthropicMessagesRequest request)
+    public static ChatCompletionOptions ToOptions(AnthropicMessagesRequest request, bool useMaxCompletionTokens = false)
     {
         var options = new ChatCompletionOptions();
 
         if (request.MaxTokens > 0)
         {
             options.MaxOutputTokenCount = request.MaxTokens;
+
+            // Explicit in both directions rather than relying on the SDK's own
+            // default (which happens to already be "legacy" for an untouched options
+            // object, but only as an implementation detail of AzureChatClient's
+            // internal patch state) -- see FoundryClientFactory's Foundry:MaxTokensParam
+            // comment for why a deployment might need the modern field name instead.
+            options.SetNewMaxCompletionTokensPropertyEnabled(useMaxCompletionTokens);
         }
         if (request.Temperature is { } temperature)
         {

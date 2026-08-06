@@ -1,3 +1,4 @@
+using System.ClientModel.Primitives;
 using System.Text.Json;
 using AFClaude;
 using OpenAI.Chat;
@@ -101,6 +102,26 @@ public class AnthropicBridgeTests
         Assert.Equal(512, options.MaxOutputTokenCount);
         Assert.NotNull(options.ToolChoice);
         Assert.False(options.AllowParallelToolCalls);
+    }
+
+    [Fact]
+    public void ToOptions_DefaultsToLegacyMaxTokensWireKey()
+    {
+        var options = AnthropicBridge.ToOptions(Parse(ToolConversationJson));
+
+        var json = ModelReaderWriter.Write(options).ToString();
+        Assert.Contains("\"max_tokens\"", json);
+        Assert.DoesNotContain("\"max_completion_tokens\"", json);
+    }
+
+    [Fact]
+    public void ToOptions_UseMaxCompletionTokens_SwitchesWireKey()
+    {
+        var options = AnthropicBridge.ToOptions(Parse(ToolConversationJson), useMaxCompletionTokens: true);
+
+        var json = ModelReaderWriter.Write(options).ToString();
+        Assert.Contains("\"max_completion_tokens\"", json);
+        Assert.DoesNotContain("\"max_tokens\"", json);
     }
 
     [Theory]

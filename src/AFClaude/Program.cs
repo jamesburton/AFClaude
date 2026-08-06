@@ -435,7 +435,7 @@ static WebApplication BuildHttpApp(
         }
 
         var messages = AnthropicBridge.ToChatMessages(request);
-        var options = AnthropicBridge.ToOptions(request);
+        var options = AnthropicBridge.ToOptions(request, foundry.UseMaxCompletionTokens);
         if (trace.Enabled)
         {
             trace.WriteAzureRequest(seq, messages, options);

@@ -81,29 +81,13 @@ internal sealed class FoundryAnthropicClient(
         "thinking", "service_tier",
     };
 
-    // The same strictness applies one level down, to typed (server/built-in) tool
-    // entries in `tools`: Claude Code adds beta-gated ones like the advisor tool
-    // ("advisor_20260301") and Foundry 400s the whole request ("tools.190: Input tag
-    // 'advisor_20260301' found using 'type' does not match any of the expected tags",
-    // observed live with claude-sonnet-5) -- stripping the beta header alone doesn't
-    // help, the tool definition is still in the body. This is Foundry's own accepted
-    // list, copied from that error; custom tools (no `type`, or "custom") always pass.
-    // An allowlist fails safe: a newer tool version Foundry hasn't adopted yet is
-    // dropped and logged rather than failing the request.
-    private static readonly HashSet<string> SupportedToolTypes = new(StringComparer.Ordinal)
-    {
-        "custom",
-        "bash_20250124",
-        "browser_toolset_20260801",
-        "code_execution_20250522", "code_execution_20250825", "code_execution_20260120", "code_execution_20260521",
-        "computer_toolset_20260801",
-        "memory_20250818",
-        "text_editor_20250124", "text_editor_20250429", "text_editor_20250728",
-        "tool_search_tool_bm25", "tool_search_tool_bm25_20251119",
-        "tool_search_tool_regex", "tool_search_tool_regex_20251119",
-        "web_fetch_20250910", "web_fetch_20260209", "web_fetch_20260309", "web_fetch_20260318",
-        "web_search_20250305", "web_search_20260209", "web_search_20260318",
-    };
+    // Strict mode's reactive half (see FoundryRejectionLearner): what Foundry has told
+    // this process it rejects, applied by PrepareBody on every later request.
+    private readonly FoundryRejectionLearner _learner = new();
+
+    // Bounds the learn-and-retry loop. Each retry must have learned something new, so
+    // this only matters for a request tripping several distinct rejections at once.
+    private const int MaxRejectionRetries = 3;
 
     // anthropic-beta handling. Claude Code sends opt-in feature flags (e.g.
     // "advisor-tool-2026-03-01") when it believes it's talking to real Anthropic
@@ -129,9 +113,40 @@ internal sealed class FoundryAnthropicClient(
         var token = await credential.GetTokenAsync(
             new TokenRequestContext([FoundryClientFactory.TokenScope]), cancellationToken);
 
+        for (var attempt = 0; ; attempt++)
+        {
+            IReadOnlyList<string> dropped = [];
+            var response = await SendOnceAsync(PrepareBody(rawBody, d => dropped = d), path, anthropicVersion, anthropicBeta, token, cancellationToken);
+
+            // Strict mode only: learn from Foundry's validation 400 and retry once per
+            // new lesson. Error bodies are small, so buffering one to read it is fine;
+            // buffering also leaves it readable for the caller if we don't retry.
+            if (bodyMode == BodyStrict
+                && response.StatusCode == System.Net.HttpStatusCode.BadRequest
+                && attempt < MaxRejectionRetries)
+            {
+                await response.Content.LoadIntoBufferAsync(cancellationToken);
+                if (_learner.TryLearn(await response.Content.ReadAsStringAsync(cancellationToken)))
+                {
+                    response.Dispose();
+                    continue;
+                }
+            }
+
+            if (dropped.Count > 0)
+            {
+                onDroppedBodyFields?.Invoke(dropped);
+            }
+            return response;
+        }
+    }
+
+    private async Task<HttpResponseMessage> SendOnceAsync(
+        string body, string path, string? anthropicVersion, string? anthropicBeta, AccessToken token, CancellationToken cancellationToken)
+    {
         var request = new HttpRequestMessage(HttpMethod.Post, new Uri(endpoint, $"anthropic/v1/{path}"))
         {
-            Content = new StringContent(PrepareBody(rawBody, onDroppedBodyFields), Encoding.UTF8, "application/json"),
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
         };
         request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token.Token}");
         request.Headers.TryAddWithoutValidation("anthropic-version",
@@ -211,8 +226,9 @@ internal sealed class FoundryAnthropicClient(
     }
 
     // Rewrites model to the configured deployment and, in strict body mode, drops
-    // top-level fields outside the standard Messages API and `tools` entries of a type
-    // Foundry doesn't accept (both reported via the callback; tools as "tools[<type>]").
+    // top-level fields outside the standard Messages API or that Foundry has rejected
+    // before, and `tools` entries of a type Foundry has said it doesn't accept (all
+    // reported via the callback; tools as "tools[<type>]").
     internal string PrepareBody(string rawBody, Action<IReadOnlyList<string>>? onDroppedFields = null)
     {
         try
@@ -223,7 +239,9 @@ internal sealed class FoundryAnthropicClient(
 
                 if (bodyMode == BodyStrict)
                 {
-                    var dropped = obj.Select(p => p.Key).Where(k => !StandardMessagesFields.Contains(k)).ToList();
+                    var dropped = obj.Select(p => p.Key)
+                        .Where(k => !StandardMessagesFields.Contains(k) || _learner.IsRejectedField(k))
+                        .ToList();
                     foreach (var key in dropped)
                     {
                         obj.Remove(key);
@@ -246,10 +264,11 @@ internal sealed class FoundryAnthropicClient(
         return rawBody;
     }
 
-    // Removes typed tool entries outside SupportedToolTypes; returns "tools[<type>]" for each.
-    private static IEnumerable<string> DropUnsupportedTools(JsonObject body)
+    // Removes typed tool entries outside the learned accepted set (nothing until Foundry
+    // has rejected one); returns "tools[<type>]" for each.
+    private IEnumerable<string> DropUnsupportedTools(JsonObject body)
     {
-        if (body["tools"] is not JsonArray tools)
+        if (_learner.AcceptedToolTypes is not { } accepted || body["tools"] is not JsonArray tools)
         {
             return [];
         }
@@ -258,7 +277,7 @@ internal sealed class FoundryAnthropicClient(
             .Where(t => t is JsonObject tool
                         && tool["type"] is JsonValue type
                         && type.TryGetValue<string>(out var name)
-                        && !SupportedToolTypes.Contains(name))
+                        && !accepted.Contains(name))
             .ToList();
         foreach (var tool in unsupported)
         {

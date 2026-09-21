@@ -152,36 +152,91 @@ public class FoundryAnthropicTests
     // tag 'advisor_20260301' found using 'type' does not match any of the expected
     // tags", observed live with claude-sonnet-5) -- stripping the beta header wasn't
     // enough, the advisor tool definition was still in the body.
+    private const string AdvisorRejection = """
+        {"type":"error","error":{"type":"invalid_request_error","message":"tools.3: Input tag 'advisor_20260301' found using 'type' does not match any of the expected tags: 'bash_20250124', 'custom', 'web_search_20250305'"}}
+        """;
+
+    private const string ToolsBody = """
+        {"model":"m","max_tokens":5,"messages":[],"tools":[{"name":"Read","input_schema":{}},{"type":"custom","name":"c","input_schema":{}},{"type":"web_search_20250305","name":"web_search"},{"type":"advisor_20260301","name":"advisor"}],"tool_choice":{"type":"tool","name":"advisor"}}
+        """;
+
     [Fact]
-    public void PrepareBody_StrictMode_DropsUnsupportedTypedToolsOnly()
+    public async Task Forward_ToolTypeRejection_StripsLearnedTypesAndRetries()
     {
-        var client = new FoundryAnthropicClient(
-            new HttpClient(new CapturingHandler(HttpStatusCode.OK, "{}")),
-            new Uri("https://r.example/"), "dep", new StaticCredential("t"));
+        var handler = new ScriptedHandler((HttpStatusCode.BadRequest, AdvisorRejection), (HttpStatusCode.OK, "{}"));
+        var client = new FoundryAnthropicClient(new HttpClient(handler), new Uri("https://r.example/"), "dep", new StaticCredential("t"));
 
         IReadOnlyList<string>? dropped = null;
-        var body = client.PrepareBody(
-            """{"model":"m","messages":[],"tools":[{"name":"Read","input_schema":{}},{"type":"custom","name":"c","input_schema":{}},{"type":"web_search_20250305","name":"web_search"},{"type":"advisor_20260301","name":"advisor"}]}""",
-            d => dropped = d);
+        using var response = await client.ForwardAsync(ToolsBody, "messages", null, null, CancellationToken.None, d => dropped = d);
 
-        using var doc = JsonDocument.Parse(body);
-        var names = doc.RootElement.GetProperty("tools").EnumerateArray().Select(t => t.GetProperty("name").GetString());
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(2, handler.Bodies.Count);
+        Assert.Contains("advisor_20260301", handler.Bodies[0]); // optimistic first attempt
+
+        using var retried = JsonDocument.Parse(handler.Bodies[1]);
+        var names = retried.RootElement.GetProperty("tools").EnumerateArray().Select(t => t.GetProperty("name").GetString());
         Assert.Equal(["Read", "c", "web_search"], names);
+
+        // A tool_choice forcing the dropped tool would itself be a 400 -- falls back to auto.
+        Assert.Equal("auto", retried.RootElement.GetProperty("tool_choice").GetProperty("type").GetString());
         Assert.Equal(["tools[advisor_20260301]"], dropped);
     }
 
     [Fact]
-    public void PrepareBody_StrictMode_ToolChoiceForcingDroppedTool_FallsBackToAuto()
+    public async Task Forward_LearnedRejection_AppliesUpFrontToLaterRequests()
     {
+        var handler = new ScriptedHandler(
+            (HttpStatusCode.BadRequest, AdvisorRejection), (HttpStatusCode.OK, "{}"), (HttpStatusCode.OK, "{}"));
+        var client = new FoundryAnthropicClient(new HttpClient(handler), new Uri("https://r.example/"), "dep", new StaticCredential("t"));
+
+        (await client.ForwardAsync(ToolsBody, "messages", null, null, CancellationToken.None)).Dispose();
+        (await client.ForwardAsync(ToolsBody, "messages", null, null, CancellationToken.None)).Dispose();
+
+        Assert.Equal(3, handler.Bodies.Count); // only the first request paid the retry
+        Assert.DoesNotContain("advisor_20260301", handler.Bodies[2]);
+    }
+
+    [Fact]
+    public async Task Forward_ExtraInputsRejection_DropsThatFieldAndRetries()
+    {
+        const string rejection = """{"type":"error","error":{"type":"invalid_request_error","message":"service_tier: Extra inputs are not permitted"}}""";
+        var handler = new ScriptedHandler((HttpStatusCode.BadRequest, rejection), (HttpStatusCode.OK, "{}"));
+        var client = new FoundryAnthropicClient(new HttpClient(handler), new Uri("https://r.example/"), "dep", new StaticCredential("t"));
+
+        using var response = await client.ForwardAsync(
+            """{"model":"m","max_tokens":5,"messages":[],"service_tier":"auto"}""", "messages", null, null, CancellationToken.None);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.DoesNotContain("service_tier", handler.Bodies[1]);
+    }
+
+    [Fact]
+    public async Task Forward_UnrecognisedBadRequest_IsReturnedWithoutRetry()
+    {
+        const string rejection = """{"type":"error","error":{"type":"invalid_request_error","message":"messages: at least one message is required"}}""";
+        var handler = new ScriptedHandler((HttpStatusCode.BadRequest, rejection));
+        var client = new FoundryAnthropicClient(new HttpClient(handler), new Uri("https://r.example/"), "dep", new StaticCredential("t"));
+
+        using var response = await client.ForwardAsync(
+            """{"model":"m","max_tokens":5,"messages":[]}""", "messages", null, null, CancellationToken.None);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Single(handler.Bodies);
+        Assert.Equal(rejection, await response.Content.ReadAsStringAsync()); // still readable after inspection
+    }
+
+    [Fact]
+    public async Task Forward_PassthroughMode_NeverLearnsOrRetries()
+    {
+        var handler = new ScriptedHandler((HttpStatusCode.BadRequest, AdvisorRejection));
         var client = new FoundryAnthropicClient(
-            new HttpClient(new CapturingHandler(HttpStatusCode.OK, "{}")),
-            new Uri("https://r.example/"), "dep", new StaticCredential("t"));
+            new HttpClient(handler), new Uri("https://r.example/"), "dep", new StaticCredential("t"),
+            bodyMode: FoundryAnthropicClient.BodyPassthrough);
 
-        var body = client.PrepareBody(
-            """{"model":"m","messages":[],"tools":[{"type":"advisor_20260301","name":"advisor"}],"tool_choice":{"type":"tool","name":"advisor"}}""");
+        using var response = await client.ForwardAsync(ToolsBody, "messages", null, null, CancellationToken.None);
 
-        using var doc = JsonDocument.Parse(body);
-        Assert.Equal("auto", doc.RootElement.GetProperty("tool_choice").GetProperty("type").GetString());
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Single(handler.Bodies);
     }
 
     [Fact]
@@ -240,6 +295,22 @@ public class FoundryAnthropicTests
 
         public override ValueTask<AccessToken> GetTokenAsync(TokenRequestContext requestContext, CancellationToken cancellationToken)
             => new(GetToken(requestContext, cancellationToken));
+    }
+
+    // Replies with the scripted responses in order, recording each request body.
+    private sealed class ScriptedHandler(params (HttpStatusCode Status, string Body)[] responses) : HttpMessageHandler
+    {
+        public List<string> Bodies { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Bodies.Add(await request.Content!.ReadAsStringAsync(cancellationToken));
+            var (status, body) = responses[Bodies.Count - 1];
+            return new HttpResponseMessage(status)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+            };
+        }
     }
 
     private sealed class CapturingHandler(HttpStatusCode status, string responseBody) : HttpMessageHandler

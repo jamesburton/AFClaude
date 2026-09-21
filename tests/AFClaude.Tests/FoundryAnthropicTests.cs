@@ -148,6 +148,42 @@ public class FoundryAnthropicTests
         Assert.Equal(["context_management", "mcp_servers"], dropped);
     }
 
+    // Regression: Foundry 400s on typed tool entries it doesn't know ("tools.190: Input
+    // tag 'advisor_20260301' found using 'type' does not match any of the expected
+    // tags", observed live with claude-sonnet-5) -- stripping the beta header wasn't
+    // enough, the advisor tool definition was still in the body.
+    [Fact]
+    public void PrepareBody_StrictMode_DropsUnsupportedTypedToolsOnly()
+    {
+        var client = new FoundryAnthropicClient(
+            new HttpClient(new CapturingHandler(HttpStatusCode.OK, "{}")),
+            new Uri("https://r.example/"), "dep", new StaticCredential("t"));
+
+        IReadOnlyList<string>? dropped = null;
+        var body = client.PrepareBody(
+            """{"model":"m","messages":[],"tools":[{"name":"Read","input_schema":{}},{"type":"custom","name":"c","input_schema":{}},{"type":"web_search_20250305","name":"web_search"},{"type":"advisor_20260301","name":"advisor"}]}""",
+            d => dropped = d);
+
+        using var doc = JsonDocument.Parse(body);
+        var names = doc.RootElement.GetProperty("tools").EnumerateArray().Select(t => t.GetProperty("name").GetString());
+        Assert.Equal(["Read", "c", "web_search"], names);
+        Assert.Equal(["tools[advisor_20260301]"], dropped);
+    }
+
+    [Fact]
+    public void PrepareBody_StrictMode_ToolChoiceForcingDroppedTool_FallsBackToAuto()
+    {
+        var client = new FoundryAnthropicClient(
+            new HttpClient(new CapturingHandler(HttpStatusCode.OK, "{}")),
+            new Uri("https://r.example/"), "dep", new StaticCredential("t"));
+
+        var body = client.PrepareBody(
+            """{"model":"m","messages":[],"tools":[{"type":"advisor_20260301","name":"advisor"}],"tool_choice":{"type":"tool","name":"advisor"}}""");
+
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("auto", doc.RootElement.GetProperty("tool_choice").GetProperty("type").GetString());
+    }
+
     [Fact]
     public void PrepareBody_PassthroughMode_KeepsNonStandardFields()
     {

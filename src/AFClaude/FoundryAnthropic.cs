@@ -81,6 +81,30 @@ internal sealed class FoundryAnthropicClient(
         "thinking", "service_tier",
     };
 
+    // The same strictness applies one level down, to typed (server/built-in) tool
+    // entries in `tools`: Claude Code adds beta-gated ones like the advisor tool
+    // ("advisor_20260301") and Foundry 400s the whole request ("tools.190: Input tag
+    // 'advisor_20260301' found using 'type' does not match any of the expected tags",
+    // observed live with claude-sonnet-5) -- stripping the beta header alone doesn't
+    // help, the tool definition is still in the body. This is Foundry's own accepted
+    // list, copied from that error; custom tools (no `type`, or "custom") always pass.
+    // An allowlist fails safe: a newer tool version Foundry hasn't adopted yet is
+    // dropped and logged rather than failing the request.
+    private static readonly HashSet<string> SupportedToolTypes = new(StringComparer.Ordinal)
+    {
+        "custom",
+        "bash_20250124",
+        "browser_toolset_20260801",
+        "code_execution_20250522", "code_execution_20250825", "code_execution_20260120", "code_execution_20260521",
+        "computer_toolset_20260801",
+        "memory_20250818",
+        "text_editor_20250124", "text_editor_20250429", "text_editor_20250728",
+        "tool_search_tool_bm25", "tool_search_tool_bm25_20251119",
+        "tool_search_tool_regex", "tool_search_tool_regex_20251119",
+        "web_fetch_20250910", "web_fetch_20260209", "web_fetch_20260309", "web_fetch_20260318",
+        "web_search_20250305", "web_search_20260209", "web_search_20260318",
+    };
+
     // anthropic-beta handling. Claude Code sends opt-in feature flags (e.g.
     // "advisor-tool-2026-03-01") when it believes it's talking to real Anthropic
     // infrastructure; Foundry's hosted Claude endpoint hard-rejects unknown values
@@ -187,7 +211,8 @@ internal sealed class FoundryAnthropicClient(
     }
 
     // Rewrites model to the configured deployment and, in strict body mode, drops
-    // top-level fields outside the standard Messages API (reported via the callback).
+    // top-level fields outside the standard Messages API and `tools` entries of a type
+    // Foundry doesn't accept (both reported via the callback; tools as "tools[<type>]").
     internal string PrepareBody(string rawBody, Action<IReadOnlyList<string>>? onDroppedFields = null)
     {
         try
@@ -203,6 +228,7 @@ internal sealed class FoundryAnthropicClient(
                     {
                         obj.Remove(key);
                     }
+                    dropped.AddRange(DropUnsupportedTools(obj));
                     if (dropped.Count > 0)
                     {
                         onDroppedFields?.Invoke(dropped);
@@ -218,5 +244,36 @@ internal sealed class FoundryAnthropicClient(
             // caller's real answer.
         }
         return rawBody;
+    }
+
+    // Removes typed tool entries outside SupportedToolTypes; returns "tools[<type>]" for each.
+    private static IEnumerable<string> DropUnsupportedTools(JsonObject body)
+    {
+        if (body["tools"] is not JsonArray tools)
+        {
+            return [];
+        }
+
+        var unsupported = tools
+            .Where(t => t is JsonObject tool
+                        && tool["type"] is JsonValue type
+                        && type.TryGetValue<string>(out var name)
+                        && !SupportedToolTypes.Contains(name))
+            .ToList();
+        foreach (var tool in unsupported)
+        {
+            tools.Remove(tool);
+        }
+
+        // A tool_choice forcing a tool we just removed would trade one 400 for another
+        // (it must name a tool in `tools`) -- fall back to letting the model choose.
+        var removedNames = unsupported.Select(t => t!["name"]?.GetValue<string>()).ToHashSet();
+        if (body["tool_choice"] is JsonObject choice
+            && choice["type"]?.GetValue<string>() == "tool"
+            && removedNames.Contains(choice["name"]?.GetValue<string>()))
+        {
+            body["tool_choice"] = new JsonObject { ["type"] = "auto" };
+        }
+        return unsupported.Select(t => $"tools[{t!["type"]}]");
     }
 }

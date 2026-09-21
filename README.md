@@ -70,9 +70,9 @@ Set via environment variables (or `appsettings.json` / `dotnet user-secrets` loc
 | `Foundry__Deployment` | `gpt-4o-mini`                                       | Deployment name, not the base model name. |
 | `Foundry__Api`        | `auto` (default)                                   | Which API surface serves the deployment. `auto` probes once and prefers the **native Anthropic passthrough** (Claude deployments on Foundry live at `{endpoint}/anthropic/v1/messages`, not the Azure-OpenAI route); `anthropic` / `openai` skip detection. The OpenAI path is retained for OpenAI-compatible deployments and, in future, other OpenAI-only hosts (e.g. Ollama) — that broader use is untested so far. |
 | `Foundry__AnthropicBeta` | `strip` (default)                               | `anthropic-beta` header policy for the passthrough. Claude Code sends opt-in feature flags assuming real Anthropic infrastructure, but Foundry **hard-rejects unknown beta values with a 400** (observed live with `advisor-tool-2026-03-01`) — so the default strips them; features degrade gracefully. `passthrough` forwards the client's flags; any other value is sent as a literal replacement list. |
-| `Foundry__AnthropicBody` | `strict` (default)                              | Request-body policy for the passthrough — the body-level twin of the header policy. Foundry also **400s on beta-gated top-level body fields** (observed live: `context_management: Extra inputs are not permitted`), so `strict` keeps only the standard Anthropic Messages API fields and logs what it drops. `passthrough` forwards the body untouched. |
+| `Foundry__AnthropicBody` | `strict` (default)                              | Request-body policy for the passthrough — the body-level twin of the header policy. Foundry also **400s on beta-gated top-level body fields** (observed live: `context_management: Extra inputs are not permitted`), so `strict` keeps only the standard Anthropic Messages API fields and and logs what it drops. `passthrough` forwards the body untouched. |
 | `Foundry__CliTimeoutSeconds` | `60` (default)                              | How long to wait for the `az` CLI to produce a token. The Azure SDK default (13s) is too short for a cold `az` start on slow or loaded machines (14–24s observed) — AFClaude defaults to 60; raise it if you still see token-timeout errors. |
-| `Foundry__MaxTokensParam` | `legacy` (default)                          | Which token-limit field the bridge (OpenAI-compatible deployments only) sends: `legacy` for `max_tokens` (what most Azure deployments still expect — the Azure SDK rewrites the modern field back to this by default), or `new` for `max_completion_tokens`. Set to `new` if Azure rejects requests with `Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens' instead` (observed live on a non-GPT-family deployment). |
+| `Foundry__MaxTokensParam` | `auto` (default)                            | Which token-limit field the bridge (OpenAI-compatible deployments only) sends. There's no reliable way to know in advance which a given deployment needs — it depends on the deployment, not just the model family, and shifts as new model generations ship. `auto` starts optimistic with the legacy `max_tokens` field and self-heals the first time a request is rejected with `Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens' instead`: it retries once with the modern field, caches the answer for the rest of the process, and patches the backing saved config file (if one exists) so future runs skip the retry. `legacy`/`new` pin the field explicitly and skip self-healing. |
 | `AFClaude__TraceDir`  | *(unset)*                                          | Opt-in wire tracing for `/v1/messages`: dumps each request's raw Anthropic body, translated Azure request, Azure response, and the reply to numbered files in this directory. For diagnosing translation/model issues. **Traces contain full conversation content** — use a private directory and delete afterwards. |
 
 ### Interactive setup (`launch` / `--http` only)
@@ -83,8 +83,12 @@ found — see below), `launch` and `--http` mode drop into an interactive picker
 account deployment list`) instead of failing fast, as long as a real terminal is
 attached (it never triggers under a redirected stdin/stdout, and never in the default
 MCP stdio mode — Claude launches that one with no operator present). After picking a
-deployment it probes which API surface it answers on (same logic as `Foundry__Api=auto`)
-and offers to save the result.
+deployment it probes which API surface it answers on (same logic as `Foundry__Api=auto`);
+for OpenAI-compatible deployments it also proactively checks whether `max_tokens` is
+rejected in favour of `max_completion_tokens` (see `Foundry__MaxTokensParam` above) and,
+if so, saves `new` so there's no first-request retry later; otherwise it saves `auto`
+(if that check itself fails — throttling, quota — it also falls back to `auto`). Then it
+offers to save the result.
 
 | Flag | Effect |
 |---|---|
@@ -98,12 +102,13 @@ Saved config files are plain JSON:
   "Endpoint": "https://<resource>.cognitiveservices.azure.com/",
   "Deployment": "<deployment-name>",
   "Api": "anthropic",
-  "MaxTokensParam": "legacy"
+  "MaxTokensParam": "new"
 }
 ```
 
-`MaxTokensParam` is optional (defaults to `legacy` — see `Foundry__MaxTokensParam` above);
-older saved files without it still load fine. Keep multiple config files (one per
+`MaxTokensParam` is optional and defaults to `auto` (see `Foundry__MaxTokensParam`
+above), so older saved files without it still load fine. An explicit `legacy` or `new`
+pins the field and disables self-healing. Keep multiple config files (one per
 deployment) and switch between them with `--config <file>` — useful when you have
 several deployments on the same resource with different requirements, e.g. a
 Claude deployment (`Api: anthropic`) alongside GPT-family deployments that need

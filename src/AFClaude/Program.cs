@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net.Sockets;
 using System.Text.Json;
 using AFClaude;
+using Azure.AI.OpenAI.Chat;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Agents.AI;
@@ -187,7 +188,19 @@ static async Task<Dictionary<string, string?>> ResolveFoundryConfigOverridesAsyn
 
     // --select always re-runs the wizard, ignoring any existing saved config file
     // (this doubles as the "reset" case without needing a second flag).
-    var resolved = selectRequested ? null : FoundryConfigFile.TryLoad(explicitConfigPath);
+    // configFilePath tracks which file (if any) is backing this run, so a later
+    // runtime self-heal (MaxTokensParamResolver) knows where to persist to.
+    FoundryConfig? resolved = null;
+    string? configFilePath = null;
+
+    if (!selectRequested)
+    {
+        resolved = FoundryConfigFile.TryLoad(explicitConfigPath);
+        if (resolved is not null)
+        {
+            configFilePath = explicitConfigPath ?? FoundryConfigFile.DefaultFileName;
+        }
+    }
 
     if (resolved is null)
     {
@@ -200,7 +213,9 @@ static async Task<Dictionary<string, string?>> ResolveFoundryConfigOverridesAsyn
         var timeoutSeconds = configuration.GetValue<int?>("Foundry:CliTimeoutSeconds") ?? 60;
         try
         {
-            resolved = await FoundryConfigWizard.RunAsync(timeoutSeconds, suggestedFileName, CancellationToken.None);
+            var wizardResult = await FoundryConfigWizard.RunAsync(timeoutSeconds, suggestedFileName, CancellationToken.None);
+            resolved = wizardResult.Config;
+            configFilePath = wizardResult.SavedPath;
         }
         catch (AzCliException)
         {
@@ -227,6 +242,10 @@ static async Task<Dictionary<string, string?>> ResolveFoundryConfigOverridesAsyn
     if (string.IsNullOrWhiteSpace(configuration["Foundry:MaxTokensParam"]))
     {
         overrides["Foundry:MaxTokensParam"] = resolved.MaxTokensParam;
+    }
+    if (configFilePath is not null)
+    {
+        overrides["Foundry:ConfigFilePath"] = configFilePath;
     }
     return overrides;
 }
@@ -439,7 +458,10 @@ static WebApplication BuildHttpApp(
         }
 
         var messages = AnthropicBridge.ToChatMessages(request);
-        var options = AnthropicBridge.ToOptions(request, foundry.UseMaxCompletionTokens);
+        // Captured once so the self-heal knows which field THIS request actually sent
+        // (see MaxTokensParamResolver.ShouldRetryWithNew).
+        var useMaxCompletionTokens = foundry.MaxTokensParam.Current;
+        var options = AnthropicBridge.ToOptions(request, useMaxCompletionTokens);
         if (trace.Enabled)
         {
             trace.WriteAzureRequest(seq, messages, options);
@@ -450,14 +472,14 @@ static WebApplication BuildHttpApp(
 
         if (request.Stream)
         {
-            await StreamBridgeAsync(http, chatClient, messages, options, messageId, model, trace, seq, logger, cancellationToken);
+            await StreamBridgeAsync(http, chatClient, messages, options, useMaxCompletionTokens, messageId, model, trace, seq, logger, foundry, cancellationToken);
             return;
         }
 
         ChatCompletion completion;
         try
         {
-            completion = await chatClient.CompleteChatAsync(messages, options, cancellationToken);
+            completion = await CompleteChatWithMaxTokensFallbackAsync(chatClient, messages, options, useMaxCompletionTokens, foundry, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -513,20 +535,57 @@ static WebApplication BuildHttpApp(
     return app;
 }
 
+// Self-heals Foundry:MaxTokensParam=auto (the default): tries the request as-is, and on
+// the specific "use max_completion_tokens instead" rejection of a request that sent the
+// legacy field, flips the resolver, retries once with the modern field, and persists the
+// answer so future requests/processes skip the retry. ShouldRetryWithNew returning false
+// (explicit legacy/new, or this request already sent the modern field) means the
+// exception is real -- rethrow rather than retry.
+static async Task<ChatCompletion> CompleteChatWithMaxTokensFallbackAsync(
+    ChatClient chatClient, IEnumerable<ChatMessage> messages, ChatCompletionOptions options,
+    bool useMaxCompletionTokens, FoundryClient foundry, CancellationToken cancellationToken)
+{
+    try
+    {
+        return await chatClient.CompleteChatAsync(messages, options, cancellationToken);
+    }
+    catch (Exception ex) when (MaxTokensParamResolver.IsMaxTokensRejected(ex) && foundry.MaxTokensParam.ShouldRetryWithNew(useMaxCompletionTokens))
+    {
+        options.SetNewMaxCompletionTokensPropertyEnabled(true);
+        var retried = await chatClient.CompleteChatAsync(messages, options, cancellationToken);
+        PersistMaxTokensParam(foundry);
+        return retried;
+    }
+}
+
+// Best effort: a saved config only exists when one is actually backing this run (see
+// FoundryClientFactory's Foundry:ConfigFilePath comment); persistence failing must never
+// break the request that already succeeded.
+static void PersistMaxTokensParam(FoundryClient foundry)
+{
+    if (foundry.ConfigFilePath is not null)
+    {
+        FoundryConfigFile.TryPersistMaxTokensParam(foundry.ConfigFilePath, "new");
+    }
+}
+
 // Real incremental streaming for the bridge path: Azure's streaming chat completion
 // is translated update-by-update into Anthropic SSE. Errors before the first update
-// return a normal classified JSON error; mid-stream failures emit an Anthropic
-// `error` event (headers are already sent by then).
+// return a normal classified JSON error (including one retry for the MaxTokensParam
+// self-heal, same as the non-streaming path above); mid-stream failures emit an
+// Anthropic `error` event (headers are already sent by then).
 static async Task StreamBridgeAsync(
     HttpContext http,
     ChatClient chatClient,
     List<ChatMessage> messages,
     ChatCompletionOptions options,
+    bool useMaxCompletionTokens,
     string messageId,
     string model,
     RequestTrace trace,
     int seq,
     ILogger logger,
+    FoundryClient foundry,
     CancellationToken cancellationToken)
 {
     var translator = new AnthropicStreamTranslator(messageId, model);
@@ -571,6 +630,16 @@ static async Task StreamBridgeAsync(
         {
             await EmitAsync(e);
         }
+    }
+    catch (Exception ex) when (!started && MaxTokensParamResolver.IsMaxTokensRejected(ex) && foundry.MaxTokensParam.ShouldRetryWithNew(useMaxCompletionTokens))
+    {
+        // The rejection happens at request-validation time, always before the first
+        // update -- retry the whole stream once with the modern field (passing true so
+        // a second rejection can't recurse again), then persist.
+        options.SetNewMaxCompletionTokensPropertyEnabled(true);
+        await StreamBridgeAsync(http, chatClient, messages, options, true, messageId, model, trace, seq, logger, foundry, cancellationToken);
+        PersistMaxTokensParam(foundry);
+        return;
     }
     catch (Exception ex) when (!started)
     {

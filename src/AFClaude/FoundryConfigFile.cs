@@ -5,9 +5,11 @@ namespace AFClaude;
 // The Foundry settings the interactive picker resolves and can persist. Api is always
 // a concrete value here ("anthropic"/"openai") — "auto" is never saved, since a saved
 // config exists specifically to skip the probe next time. MaxTokensParam defaults to
-// "legacy" so older 3-field saved config files (from before this field existed) still
-// deserialize correctly with today's default behaviour.
-internal sealed record FoundryConfig(string Endpoint, string Deployment, string Api, string MaxTokensParam = "legacy");
+// "auto" -- the same default as when nothing is configured at all -- so older 3-field
+// saved config files (from before this field existed) get the self-healing behaviour
+// too. auto sends the legacy field until Azure authoritatively rejects it, so it's
+// never worse than an explicit "legacy".
+internal sealed record FoundryConfig(string Endpoint, string Deployment, string Api, string MaxTokensParam = "auto");
 
 internal static class FoundryConfigFile
 {
@@ -47,5 +49,25 @@ internal static class FoundryConfigFile
         // lowercase files still load fine.
         var options = new JsonSerializerOptions { WriteIndented = true };
         File.WriteAllText(path, JsonSerializer.Serialize(config, options));
+    }
+
+    // Best effort, for MaxTokensParamResolver's runtime self-heal: rewrites just the
+    // MaxTokensParam of an existing saved config so the next run skips the retry.
+    // Never throws -- the request that triggered this has already succeeded, and a
+    // missing/locked/corrupt file must not turn that into a failure.
+    public static void TryPersistMaxTokensParam(string path, string maxTokensParam)
+    {
+        try
+        {
+            var existing = TryLoad(path);
+            if (existing is not null && existing.MaxTokensParam != maxTokensParam)
+            {
+                Save(path, existing with { MaxTokensParam = maxTokensParam });
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            // Ignored -- see comment above.
+        }
     }
 }

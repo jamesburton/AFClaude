@@ -11,7 +11,8 @@ internal sealed record FoundryClient(
     FoundryApiResolver Api,
     string Deployment,
     TokenCredential Credential,
-    bool UseMaxCompletionTokens);
+    MaxTokensParamResolver MaxTokensParam,
+    string? ConfigFilePath);
 
 internal static class FoundryClientFactory
 {
@@ -83,22 +84,32 @@ internal static class FoundryClientFactory
         // field back to the legacy `max_tokens` before every request unless told
         // otherwise (AzureChatClient.RefreshMaxTokenSerialization) -- most Azure
         // deployments still expect the legacy name, but some newer/non-GPT-family
-        // deployments (observed live: a Terra deployment) reject `max_tokens` outright
-        // ("Use 'max_completion_tokens' instead"). legacy (default) keeps today's
-        // behaviour; new opts a deployment into the modern field name.
+        // deployments (observed live: gpt-5.6) reject `max_tokens` outright ("Use
+        // 'max_completion_tokens' instead"). There's no reliable way to know which in
+        // advance, so auto (default) starts optimistic with legacy and self-heals the
+        // first time a request is rejected for exactly this reason (see
+        // MaxTokensParamResolver); legacy/new pin the behaviour explicitly and skip
+        // self-healing entirely.
         var maxTokensParamValue = configuration["Foundry:MaxTokensParam"]?.Trim().ToLowerInvariant();
-        var useMaxCompletionTokens = maxTokensParamValue switch
+        bool? configuredUseMaxCompletionTokens = maxTokensParamValue switch
         {
-            null or "" or "legacy" or "max_tokens" => false,
+            null or "" or "auto" => null,
+            "legacy" or "max_tokens" => false,
             "new" or "max_completion_tokens" => true,
             _ => throw new InvalidOperationException(
-                $"Invalid configuration 'Foundry:MaxTokensParam' value '{maxTokensParamValue}'. Use 'legacy' (default) or 'new'."),
+                $"Invalid configuration 'Foundry:MaxTokensParam' value '{maxTokensParamValue}'. Use 'auto' (default), 'legacy', or 'new'."),
         };
+
+        // Set only when a saved config file is backing this run (loaded from disk, or
+        // just written by the wizard) -- lets a successful self-heal patch that same
+        // file so future runs skip the retry. Absent for pure env-var invocations.
+        var configFilePath = configuration["Foundry:ConfigFilePath"];
 
         var azureClient = new AzureOpenAIClient(endpoint, credential);
         var anthropic = new FoundryAnthropicClient(SharedHttp, endpoint, deployment, credential, betaMode, bodyMode);
         var resolver = new FoundryApiResolver(configuredApi, anthropic.ProbeAsync);
-        return new FoundryClient(azureClient.GetChatClient(deployment), anthropic, resolver, deployment, credential, useMaxCompletionTokens);
+        var maxTokensParam = new MaxTokensParamResolver(configuredUseMaxCompletionTokens);
+        return new FoundryClient(azureClient.GetChatClient(deployment), anthropic, resolver, deployment, credential, maxTokensParam, configFilePath);
     }
 }
 

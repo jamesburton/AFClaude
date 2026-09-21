@@ -72,7 +72,7 @@ public class FoundryConfigFileTests : IDisposable
     }
 
     [Fact]
-    public void TryLoad_OldThreeFieldFile_DefaultsMaxTokensParamToLegacy()
+    public void TryLoad_OldThreeFieldFile_DefaultsMaxTokensParamToAuto()
     {
         // Locks in backward compatibility for config files saved before this field
         // existed (e.g. the shape written by earlier AFClaude releases).
@@ -82,7 +82,7 @@ public class FoundryConfigFileTests : IDisposable
 
         var loaded = FoundryConfigFile.TryLoad(explicitPath: null);
 
-        Assert.Equal("legacy", loaded!.MaxTokensParam);
+        Assert.Equal("auto", loaded!.MaxTokensParam);
     }
 
     [Fact]
@@ -106,5 +106,27 @@ public class FoundryConfigFileTests : IDisposable
         var loaded = FoundryConfigFile.TryLoad("custom.json");
 
         Assert.Equal(config, loaded);
+    }
+
+    [Fact]
+    public void TryPersistMaxTokensParam_RewritesOnlyThatField()
+    {
+        var config = new FoundryConfig("https://example.com/", "gpt-5.6", "openai", "auto");
+        FoundryConfigFile.Save("persist.json", config);
+
+        FoundryConfigFile.TryPersistMaxTokensParam("persist.json", "new");
+
+        Assert.Equal(config with { MaxTokensParam = "new" }, FoundryConfigFile.TryLoad("persist.json"));
+    }
+
+    [Fact]
+    public void TryPersistMaxTokensParam_MissingOrCorruptFile_NeverThrows()
+    {
+        FoundryConfigFile.TryPersistMaxTokensParam("does-not-exist.json", "new");
+
+        File.WriteAllText("corrupt.json", "{not json");
+        FoundryConfigFile.TryPersistMaxTokensParam("corrupt.json", "new");
+
+        Assert.Equal("{not json", File.ReadAllText("corrupt.json")); // left untouched
     }
 }

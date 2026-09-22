@@ -749,7 +749,126 @@ deployment that needs `new` set it by hand-editing the saved file or via the env
 Verified: 2 new tests (backward-compat load, explicit round-trip with `MaxTokensParam:
 "new"`); full suite (91 tests) green.
 
+## Phase 13.5 — Self-heal `Foundry__MaxTokensParam`: `auto` default — DONE
+
+**Motivation (follow-on from 13.3/13.4):** there is no reliable way to know in advance
+whether an OpenAI-compatible deployment wants `max_tokens` or `max_completion_tokens` —
+it depends on the deployment and shifts as new model generations ship. The `legacy`
+default in 13.4 made self-healing dead code for anyone with a saved config file (saved
+files had an explicit `"MaxTokensParam": "legacy"`, which pinned the value and disabled
+self-healing), and "set it by hand-editing the file" was a poor UX.
+
+Changes (commit `700ec52`):
+- `Foundry__MaxTokensParam` default changed from `legacy` to **`auto`** everywhere:
+  `FoundryConfig`'s default field value, `FoundryClientFactory`'s parsing, and the
+  `FoundryConfigFile` deserialization fallback.
+- `MaxTokensParamResolver` (new class): encapsulates the `auto` self-healing logic.
+  Sends `max_tokens` (legacy) first; on Azure's authoritative "Use 'max_completion_tokens'
+  instead" 400 (`IsMaxTokensRejected`), retries once with the modern field, caches the
+  result for the process, and calls `TryPersistMaxTokensParam` to patch the backing saved
+  config file so future runs skip the retry. Every concurrent request that went out with
+  the legacy field gets its own independent retry. Streaming re-starts after retry.
+  `legacy`/`new` still pin the field and skip self-healing.
+- `FoundryConfigWizard`: now probes `max_tokens` vs `max_completion_tokens` before
+  offering to save; saves `new` on the rejection, `auto` on success or probe failure
+  (429/quota/content filter), so the wizard never aborts after the user has clicked
+  through it. Returns a `FoundryWizardResult` carrying the chosen config path.
+- Backward-compat: existing 3-field saved files (no `MaxTokensParam` key) deserialize
+  to `auto`, not `legacy` as before.
+
+Verified: 105 new unit tests (`MaxTokensParamResolverTests.cs`); full suite
+(116 total after all three 13.x commits) green.
+
+## Phase 13.6 — Strict body mode: drop tool types Foundry rejects — DONE
+
+**Trigger (qhub-sweden, `claude-sonnet-5`, real session):** Foundry 400'd the whole
+request with `tools.190: Input tag 'advisor_20260301' found using 'type' does not match
+any of the expected tags: ...`. Stripping the `anthropic-beta` header (Phase 9.1) wasn't
+enough — the tool definition was still present in the body.
+
+Fix (commit `f19293f`): `FoundryAnthropic.PrepareBody` in strict mode now also filters
+the `tools` array, dropping any entry whose `type` field is outside a known-good list
+(`text_editor_20250124`, `bash_20250124`, `web_search_20250305`, `computer_20250124`,
+`computer_20241022`) copied from the live Foundry error, and resets a `tool_choice`
+that forced a dropped tool back to `{"type":"auto"}` to prevent a follow-on 400.
+Custom function-calling tools (no `type` field, or `type: "function"`) always pass through.
+
+Verified: 3 new tests; full suite green.
+
+## Phase 13.7 — Strict body mode: learn from Foundry's rejections and retry — DONE
+
+**Motivation (follow-on from 13.6):** the static allowed-list from 13.6 has two failure
+modes: (a) a tool type Foundry later adopts stays stripped forever (silent regression —
+the static list can't self-correct); (b) any new beta-gated body field Claude Code starts
+sending will cause a 400 until the list is updated in code.
+
+Fix (commit `4973c15`, supersedes 13.6's static filter): `FoundryRejectionLearner` (new
+class) — process-wide learned state, populated from Foundry's own 400 error text:
+
+- On a tool-type rejection (`tools.N: Input tag 'X' ... does not match any of the
+  expected tags: [A, B, C, ...]`): adopts Foundry's own accepted-tags list (or falls
+  back to the 13.6 static list when the error can't be parsed). A tool type Foundry
+  starts supporting is automatically un-stripped.
+- On a top-level field rejection (`<field>: Extra inputs are not permitted`): learns to
+  strip that field in `PrepareBody`, in addition to the Phase 9.2 static allowlist.
+- Learner guards: retry only when something *new* was learned (max 3 retries), never
+  for `model`/`messages`/`max_tokens`, only top-level fields (dotted paths like
+  `tools.3.cache_control` ignored), strict mode only. Lessons persist for the process.
+- Applied in `ForwardAsync` via a learn-and-retry loop (`SendOnceAsync` + learner); also
+  covers `ProbeAsync` and `AskAsync`.
+- Cost: one extra round trip on the first affected request per process. Subsequent
+  requests use the learned state and don't retry.
+
+Verified: 78 new tests (`FoundryRejectionLearnerTests.cs`, extended
+`FoundryAnthropicTests.cs`); full suite (116 total) green.
+
+## Phase 14 — Multi-model routing and context-window documentation — IN PROGRESS
+
+**Trigger:** research confirmed that Claude Code's built-in Foundry alias resolution
+defaults to 200K-context models (`claude-sonnet-4.5`, `claude-opus-4.6`) causing
+early compaction on every session. The qhub-sweden deployment inventory (checked
+2026-09-22) shows `claude-sonnet-5` (1M context) is deployed and ready, but no 1M
+opus exists yet (`claude-opus-4-6` only — needs `claude-opus-4-8` or `claude-opus-5`
+deployed in the Foundry portal).
+
+### 14.1 — Document multi-model aliases and context windows — DONE
+
+- README gained a "Multi-model configuration and context windows" section:
+  `ANTHROPIC_DEFAULT_SONNET_MODEL`/`ANTHROPIC_DEFAULT_HAIKU_MODEL`/
+  `ANTHROPIC_DEFAULT_OPUS_MODEL` env vars and why they matter; in-session `/model`
+  switching; `--fallback-model`; `CLAUDE_CODE_AUTO_COMPACT_WINDOW` escape hatch;
+  AFClaude's single-deployment limitation and the Foundry Model Router alternative.
+- Status section updated to reflect v0.7.0 and the full feature set.
+
+### 14.2 — Multi-deployment router — NOT STARTED
+
+**Open question:** should AFClaude act as a model-aware router that dispatches
+requests to different Foundry deployments based on the `model` field in the request
+body, allowing Claude Code's `/model` switching to work transparently across Sonnet,
+Haiku, and Opus deployments?
+
+Options:
+1. **Route by `model` field** (AFClaude change): read multiple
+   `Foundry__Deployments__<alias>` entries, match the incoming `model` field, proxy
+   to the matching endpoint. Fallback to the primary `Foundry__Deployment` for
+   unmatched values.
+2. **Foundry Model Router** (no AFClaude change): deploy a Model Router endpoint in
+   Foundry that routes across all Claude models behind a single endpoint. Claude Code
+   sees one deployment name; Foundry handles dispatch.
+3. **Env-var only** (current status): users set `ANTHROPIC_DEFAULT_*_MODEL` to their
+   deployment names; Claude Code rewrites the `model` field in each request; AFClaude
+   passes it through unchanged. Works as long as the primary Foundry resource answers
+   for all deployment names sent — which it does when they're all on the same resource.
+
+### 14.3 — History `server_tool_use`/result block stripping — NOT STARTED
+
+When a `server_tool_use` tool is stripped from the `tools` list (e.g. `advisor_20260301`
+per Phase 13.6/13.7), a resumed conversation whose `messages` history contains prior
+`server_tool_use` content blocks and matching `tool_result` blocks for that tool type
+may still 400 — Foundry may reject history blocks referring to an unsupported tool
+type even when it's no longer in the `tools` array. Unverified; needs a traced
+resumed session as evidence.
+
 ## Explicitly out of scope for now
 
-- Multi-deployment / multi-model routing (single `Foundry:Deployment` only)
 - API-key auth path (Entra/`az` only, per the original ask)

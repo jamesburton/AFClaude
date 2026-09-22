@@ -239,6 +239,72 @@ with `stop_reason: "tool_use"`. `max_tokens`, `temperature`, `top_p`, and
 > behave oddly, set `AFClaude__TraceDir` and check whether the model's responses
 > actually contain `tool_calls` (see TESTING.md, "Stage 6c diagnosis"). See [PLAN.md](PLAN.md) Phase 8 for what's left.
 
+### Multi-model configuration and context windows
+
+Claude Code uses **model aliases** (`sonnet`, `haiku`, `opus`) that on Foundry resolve to
+specific deployments — and the Foundry defaults resolve to **older models with only a 200K
+context window**, causing earlier compaction than you'd see on the direct Anthropic API.
+
+**Pin your deployments explicitly** to avoid this:
+
+```powershell
+# PowerShell — set before calling AFClaude launch
+$env:ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-5"   # 1M context
+$env:ANTHROPIC_DEFAULT_HAIKU_MODEL  = "claude-haiku-4-5"  # 200K (fast/background)
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL   = "claude-opus-4-8"   # 1M context (deploy first if missing)
+```
+
+```cmd
+:: cmd.exe equivalent
+set ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-5
+set ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5
+set ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8
+```
+
+These env vars are read by the `claude` binary itself (not by AFClaude), so they work
+with both `launch` mode and direct Foundry usage. The deployment names must exactly match
+what you have in your Foundry resource — full deployment IDs, not model family aliases.
+
+> **Without these settings**, Claude Code's built-in Foundry defaults resolve `sonnet` →
+> claude-sonnet-4.5 and `opus` → claude-opus-4.6 (both 200K context), which compacts far
+> earlier than necessary. Models with native 1M context on Foundry: `claude-sonnet-5`,
+> `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`.
+
+You can also override the compaction threshold directly:
+
+```powershell
+$env:CLAUDE_CODE_AUTO_COMPACT_WINDOW = "900000"   # compact at 900K instead of 200K
+```
+
+#### In-session model switching
+
+Claude Code supports `/model <name>` and `--model <name>` at launch. On Foundry, use the
+**full deployment name** (not a bare alias):
+
+```
+/model claude-sonnet-5
+/model claude-opus-4-8
+```
+
+`opusplan` (Opus for planning, then Sonnet for execution) works when both
+`ANTHROPIC_DEFAULT_OPUS_MODEL` and `ANTHROPIC_DEFAULT_SONNET_MODEL` are set and both
+deployments exist.
+
+#### Fallback chains
+
+```powershell
+# Launch claude with an automatic fallback model if the primary is overloaded
+dnx AFClaude -y -- launch --fallback-model claude-sonnet-5,claude-haiku-4-5
+```
+
+> **AFClaude's current limitation:** AFClaude is configured with a **single
+> `Foundry__Deployment`** per run. All `/model` switches within a session rewrite
+> the `model` field in the request body, and AFClaude passes it through unchanged —
+> so the Foundry endpoint must support all the model names Claude Code sends, either
+> directly (one deployment per model) or via a **Foundry Model Router** deployment
+> (which routes across multiple Claude models from a single endpoint). A future
+> AFClaude multi-deployment router is tracked in PLAN.md.
+
 ### Other OpenAI-compatible clients (HTTP proxy, secondary)
 
 Run AFClaude in HTTP mode and point any OpenAI-compatible client at:
@@ -272,18 +338,17 @@ matching GitHub Environment and the `NUGET_USER` repo secret the workflow needs.
 ## Status
 
 **The project's core goal is verified end to end**: real Claude Code, routed
-through AFClaude's native passthrough, driving a genuine Claude model
-(`claude-sonnet-4-6`) deployed on Azure AI Foundry over Entra auth — tool calls
-executing correctly, streaming incrementally, no API keys anywhere.
+through AFClaude's native passthrough, driving a genuine Claude model on Azure AI
+Foundry over Entra auth — tool calls executing correctly, streaming incrementally,
+no API keys anywhere.
 
-Phases 1–9 done and verified: scaffold, HTTP proxy, MCP stdio server, `dnx`
-packaging, a **live** NuGet Trusted Publishing pipeline, classified auth-error
-surfaces (az missing / token timeout / expired session / missing data-plane RBAC
-role), full Anthropic↔OpenAI tool-use bridging for GPT-family deployments, and
-the auto-detected native Anthropic passthrough for Claude deployments (with
-Foundry-compatibility filtering of `anthropic-beta` flags and beta-gated body
-fields). Verified against real Foundry deployments of both kinds. Known model
-limit: gpt-4.1 through the (correct) bridge doesn't reliably drive Claude Code's
-tools — prefer a Claude deployment for `launch` mode. See [PLAN.md](PLAN.md)
-Phase 10 for what's left (bridge-path incremental streaming, error-surface
-parity, non-Azure OpenAI hosts).
+**v0.7.0** — all phases through 13 done and verified: scaffold, HTTP proxy, MCP
+stdio server, `dnx` packaging, a **live** NuGet Trusted Publishing pipeline,
+classified auth-error surfaces, full Anthropic↔OpenAI tool-use bridging for GPT
+deployments, the auto-detected native Anthropic passthrough for Claude deployments
+(with Foundry-compatibility filtering of `anthropic-beta` flags and beta-gated body
+fields), interactive Azure Foundry deployment picker, self-healing
+`max_tokens`/`max_completion_tokens` detection, and adaptive Foundry rejection
+learning (drops unsupported tool types / body fields on first rejection and retries,
+so future Foundry updates are picked up automatically). Verified against real Foundry
+deployments of both kinds. See [PLAN.md](PLAN.md) for the full build history.

@@ -75,7 +75,7 @@ Set via environment variables (or `appsettings.json` / `dotnet user-secrets` loc
 | `Foundry__MaxTokensParam` | `auto` (default)                            | Which token-limit field the bridge (OpenAI-compatible deployments only) sends. There's no reliable way to know in advance which a given deployment needs — it depends on the deployment, not just the model family, and shifts as new model generations ship. `auto` starts optimistic with the legacy `max_tokens` field and self-heals the first time a request is rejected with `Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens' instead`: it retries once with the modern field, caches the answer for the rest of the process, and patches the backing saved config file (if one exists) so future runs skip the retry. `legacy`/`new` pin the field explicitly and skip self-healing. |
 | `AFClaude__TraceDir`  | *(unset)*                                          | Opt-in wire tracing for `/v1/messages`: dumps each request's raw Anthropic body, translated Azure request, Azure response, and the reply to numbered files in this directory. For diagnosing translation/model issues. **Traces contain full conversation content** — use a private directory and delete afterwards. |
 
-### Interactive setup (`launch` / `--http` only)
+### Interactive setup and saved config (`launch` / `--http` only)
 
 If `Foundry__Endpoint`/`Foundry__Deployment` aren't set (and no saved config file is
 found — see below), `launch` and `--http` mode drop into an interactive picker
@@ -83,12 +83,12 @@ found — see below), `launch` and `--http` mode drop into an interactive picker
 account deployment list`) instead of failing fast, as long as a real terminal is
 attached (it never triggers under a redirected stdin/stdout, and never in the default
 MCP stdio mode — Claude launches that one with no operator present). After picking a
-deployment it probes which API surface it answers on (same logic as `Foundry__Api=auto`);
-for OpenAI-compatible deployments it also proactively checks whether `max_tokens` is
-rejected in favour of `max_completion_tokens` (see `Foundry__MaxTokensParam` above) and,
-if so, saves `new` so there's no first-request retry later; otherwise it saves `auto`
-(if that check itself fails — throttling, quota — it also falls back to `auto`). Then it
-offers to save the result.
+deployment it:
+
+1. Probes which API surface the deployment answers on (same logic as `Foundry__Api=auto`)
+2. For OpenAI-compatible deployments, checks `max_tokens` vs `max_completion_tokens` (see `Foundry__MaxTokensParam`)
+3. **Offers to configure model role aliases** — maps Claude Code role names (`Sonnet`, `Haiku`, `Opus`, `Fable`) to specific deployments on the same resource. Auto-suggests by name pattern (e.g. `claude-sonnet-5` → Sonnet role, `claude-opus-5` → Opus role, picking the lexicographically highest match so newer versions win). Each role can be skipped individually. When saved, `launch` injects the corresponding `ANTHROPIC_DEFAULT_*_MODEL` env vars automatically before starting `claude`, so in-session `/model` switching and background-task model selection work without any manual env-var management.
+4. Offers to save the result to a config file
 
 | Flag | Effect |
 |---|---|
@@ -100,21 +100,26 @@ Saved config files are plain JSON:
 ```json
 {
   "Endpoint": "https://<resource>.cognitiveservices.azure.com/",
-  "Deployment": "<deployment-name>",
+  "Deployment": "claude-sonnet-5",
   "Api": "anthropic",
-  "MaxTokensParam": "new"
+  "MaxTokensParam": "auto",
+  "ModelRoles": {
+    "Sonnet": "claude-sonnet-5",
+    "Haiku":  "claude-haiku-4-5",
+    "Opus":   "claude-opus-5",
+    "Fable":  "claude-fable-5-1"
+  }
 }
 ```
 
-`MaxTokensParam` is optional and defaults to `auto` (see `Foundry__MaxTokensParam`
-above), so older saved files without it still load fine. An explicit `legacy` or `new`
+`MaxTokensParam` and `ModelRoles` are both optional — older saved files without them
+load fine and behave as before. An explicit `legacy` or `new` for `MaxTokensParam`
 pins the field and disables self-healing. Keep multiple config files (one per
-deployment) and switch between them with `--config <file>` — useful when you have
-several deployments on the same resource with different requirements, e.g. a
-Claude deployment (`Api: anthropic`) alongside GPT-family deployments that need
-`MaxTokensParam: new`.
+deployment or model set) and switch between them with `--config <file>`.
 
 Env vars always take priority over a saved config file for any key they set.
+Explicit `ANTHROPIC_DEFAULT_*_MODEL` env vars in the caller's environment always
+override those injected from `ModelRoles`.
 
 No API keys are configured — auth is entirely via `AzureCliCredential` (falls back to
 other `DefaultAzureCredential` sources if you later want that instead).
@@ -185,10 +190,13 @@ have been run in advance, in the same user/environment context `dnx` will inheri
 dnx AFClaude -y -- launch
 ```
 
-This starts the Anthropic-compatible HTTP host on `http://127.0.0.1:31337` (override
-via `AFClaude__Launch__Port`), then execs `claude` with `ANTHROPIC_BASE_URL` pointed
-at it and `ANTHROPIC_MODEL` set to the configured Foundry deployment. When `claude`
-exits, AFClaude stops the proxy and exits with `claude`'s exit code.
+This starts the Anthropic-compatible HTTP host on an OS-assigned local port (override
+via `AFClaude__Launch__Port`), then execs `claude` with:
+- `ANTHROPIC_BASE_URL` pointed at the local proxy
+- `ANTHROPIC_MODEL` set to the configured Foundry deployment
+- `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_FABLE_MODEL` — set automatically from the saved config's `ModelRoles` (see [interactive setup](#interactive-setup-and-saved-config) below)
+
+When `claude` exits, AFClaude stops the proxy and exits with `claude`'s exit code.
 
 **All arguments after `launch` are forwarded to `claude` verbatim**, so every
 claude option works without AFClaude needing to know about it:

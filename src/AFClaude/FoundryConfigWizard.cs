@@ -46,7 +46,11 @@ internal static class FoundryConfigWizard
             maxTokensParam = await ProbeMaxTokensParamAsync(console, probeClient.ChatClient, cancellationToken);
         }
 
-        var config = new FoundryConfig(resource.Endpoint, deployment.Name, api, maxTokensParam);
+        // Model role aliases: map Claude Code role names → deployment names on this resource.
+        // Auto-suggested by name pattern (e.g. "claude-sonnet-5" → Sonnet role).
+        var modelRoles = OfferConfigureModelRoles(console, deployments, deployment.Name);
+
+        var config = new FoundryConfig(resource.Endpoint, deployment.Name, api, maxTokensParam, modelRoles);
         var savedPath = OfferSave(console, config, suggestedSaveFileName);
         return new FoundryWizardResult(config, savedPath);
     }
@@ -122,6 +126,65 @@ internal static class FoundryConfigWizard
         FoundryConfigFile.Save(fileName, config);
         console.MarkupLine($"[green]Saved to {fileName}.[/]");
         return fileName;
+    }
+
+    // Offers to assign Claude Code role aliases (Sonnet/Haiku/Opus/Fable) to deployments
+    // on the same resource. Auto-suggests by name pattern; user can override each or skip
+    // the whole step. Returns null when skipped (no ModelRoles in saved config).
+    // Exposed internal so tests can drive it with a TestConsole.
+    internal static Dictionary<string, string>? OfferConfigureModelRoles(
+        IAnsiConsole console, IReadOnlyList<AzDeployment> deployments, string primaryDeploymentName)
+    {
+        // Only makes sense when there is more than one deployment to choose from.
+        if (deployments.Count <= 1) return null;
+
+        var configure = console.Prompt(
+            new SelectionPrompt<string>()
+                .Title("Configure model role aliases for Claude Code? ([grey]Sonnet/Haiku/Opus/Fable → deployment[/])")
+                .AddChoices("Yes — configure roles now", "No — skip"));
+
+        if (configure.StartsWith("No")) return null;
+
+        var roles = new[] { "Sonnet", "Haiku", "Opus", "Fable" };
+        var deploymentNames = deployments.Select(d => d.Name).ToList();
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        console.MarkupLine("[grey]Select a deployment for each Claude Code role. Choose [dim]<skip>[/] to leave a role unset.[/]");
+
+        foreach (var role in roles)
+        {
+            var suggested = SuggestRole(role, deploymentNames) ?? primaryDeploymentName;
+            var choices = deploymentNames.Concat(new[] { "<skip>" }).ToList();
+
+            var picked = console.Prompt(
+                new SelectionPrompt<string>()
+                    .Title($"  [bold]{role}[/] role ([grey]ANTHROPIC_DEFAULT_{role.ToUpperInvariant()}_MODEL[/]):")
+                    .AddChoices(choices)
+                    .HighlightStyle("green")
+                    .UseConverter(c => c == "<skip>" ? "[grey]<skip — leave unset>[/]" :
+                        c == suggested ? $"{c} [grey](suggested)[/]" : c));
+
+            if (picked != "<skip>")
+            {
+                result[role] = picked;
+            }
+        }
+
+        return result.Count > 0 ? result : null;
+    }
+
+    // Pure name-pattern matching: returns the deployment name that best matches a role,
+    // or null if nothing is a clear match. Testable without a console or az CLI.
+    internal static string? SuggestRole(string role, IReadOnlyList<string> deploymentNames)
+    {
+        var pattern = role.ToLowerInvariant(); // "sonnet", "haiku", "opus", "fable"
+        // Prefer an exact substring match, picking the one with the highest version number
+        // (last lexicographically among matches — e.g. "claude-sonnet-5" beats "claude-sonnet-4-6").
+        var matches = deploymentNames
+            .Where(n => n.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return matches.FirstOrDefault();
     }
 
     // Reuses FoundryClientFactory.Create + the existing FoundryApiResolver rather than

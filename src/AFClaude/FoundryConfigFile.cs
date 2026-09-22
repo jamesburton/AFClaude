@@ -9,7 +9,15 @@ namespace AFClaude;
 // saved config files (from before this field existed) get the self-healing behaviour
 // too. auto sends the legacy field until Azure authoritatively rejects it, so it's
 // never worse than an explicit "legacy".
-internal sealed record FoundryConfig(string Endpoint, string Deployment, string Api, string MaxTokensParam = "auto");
+//
+// ModelRoles maps Claude Code role names to Foundry deployment names. When populated,
+// launch mode injects ANTHROPIC_DEFAULT_*_MODEL env vars automatically before spawning
+// claude, so in-session /model switching and background-task model selection work
+// without manual env-var management. Keys: "Sonnet", "Haiku", "Opus", "Fable".
+// Null (the default) means no role aliases are configured — existing saved files
+// without this field continue to work as before.
+internal sealed record FoundryConfig(string Endpoint, string Deployment, string Api, string MaxTokensParam = "auto",
+    Dictionary<string, string>? ModelRoles = null);
 
 internal static class FoundryConfigFile
 {

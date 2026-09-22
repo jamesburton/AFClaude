@@ -130,4 +130,81 @@ public class FoundryConfigWizardTests : IDisposable
         Assert.True(File.Exists("custom.json"));
         Assert.Equal(config, FoundryConfigFile.TryLoad("custom.json"));
     }
+
+    // ── SuggestRole ───────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("Sonnet", new[] { "claude-sonnet-4-6", "claude-sonnet-5", "claude-haiku-4-5" }, "claude-sonnet-5")]
+    [InlineData("Haiku",  new[] { "claude-sonnet-5", "claude-haiku-4-5", "claude-opus-5" }, "claude-haiku-4-5")]
+    [InlineData("Opus",   new[] { "claude-opus-4-6", "claude-opus-5" }, "claude-opus-5")]
+    [InlineData("Fable",  new[] { "claude-fable-5-1", "claude-sonnet-5" }, "claude-fable-5-1")]
+    [InlineData("Sonnet", new[] { "gpt-4.1", "gpt-5.6-terra" }, null)]  // no match
+    public void SuggestRole_ReturnsHighestLexicographicMatchOrNull(
+        string role, string[] deploymentNames, string? expected)
+    {
+        var result = FoundryConfigWizard.SuggestRole(role, deploymentNames);
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public void SuggestRole_CaseInsensitive()
+    {
+        var result = FoundryConfigWizard.SuggestRole("SONNET", ["Claude-Sonnet-5"]);
+        Assert.Equal("Claude-Sonnet-5", result);
+    }
+
+    // ── OfferConfigureModelRoles ──────────────────────────────────────────────────
+
+    [Fact]
+    public void OfferConfigureModelRoles_SingleDeployment_ReturnsNullWithoutPrompting()
+    {
+        var console = new TestConsole();
+        var deployments = new List<AzDeployment>
+        {
+            new("claude-sonnet-5", new AzDeploymentProperties(new AzDeploymentModel("claude-sonnet-5", "2"))),
+        };
+
+        var result = FoundryConfigWizard.OfferConfigureModelRoles(console, deployments, "claude-sonnet-5");
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void OfferConfigureModelRoles_UserSkips_ReturnsNull()
+    {
+        var console = new TestConsole();
+        console.Interactive();
+        console.Input.PushKey(ConsoleKey.DownArrow); // move to "No — skip"
+        console.Input.PushKey(ConsoleKey.Enter);
+        var deployments = MakeDeployments("claude-sonnet-5", "claude-haiku-4-5", "claude-opus-5");
+
+        var result = FoundryConfigWizard.OfferConfigureModelRoles(console, deployments, "claude-sonnet-5");
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void OfferConfigureModelRoles_UserConfigures_ReturnsMappedRoles()
+    {
+        var console = new TestConsole();
+        console.Interactive();
+        // Opt in to role configuration
+        console.Input.PushKey(ConsoleKey.Enter); // "Yes — configure roles now"
+        // Deployments are listed before <skip>, so pressing Enter selects the first
+        // deployment for each of the 4 roles (Sonnet, Haiku, Opus, Fable).
+        for (int i = 0; i < 4; i++)
+        {
+            console.Input.PushKey(ConsoleKey.Enter);
+        }
+
+        var deployments = MakeDeployments("claude-sonnet-5", "claude-haiku-4-5", "claude-opus-5", "claude-fable-5-1");
+
+        var result = FoundryConfigWizard.OfferConfigureModelRoles(console, deployments, "claude-sonnet-5");
+
+        Assert.NotNull(result);
+        Assert.NotEmpty(result);
+    }
+
+    private static List<AzDeployment> MakeDeployments(params string[] names)
+        => names.Select(n => new AzDeployment(n, new AzDeploymentProperties(new AzDeploymentModel(n, "1")))).ToList();
 }

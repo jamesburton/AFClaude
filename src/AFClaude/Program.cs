@@ -149,6 +149,19 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     psi.Environment["ANTHROPIC_API_KEY"] = "afclaude-local";
     psi.Environment["ANTHROPIC_MODEL"] = deployment;
 
+    // Inject model role aliases from the resolved config's ModelRoles, if present.
+    // These drive Claude Code's /model switching and background-task model selection
+    // (ANTHROPIC_DEFAULT_SONNET_MODEL etc.). Only set each var when it isn't already
+    // in the caller's environment — explicit env vars always win.
+    var resolvedModelRoles = launchOverrides.TryGetValue("Foundry:ModelRoles", out var rolesJson) && rolesJson is not null
+        ? JsonSerializer.Deserialize<Dictionary<string, string>>(rolesJson, JsonSerializerOptions.Web)
+        : null;
+    if (resolvedModelRoles is null && FoundryConfigFile.TryLoad(launchOverrides.GetValueOrDefault("Foundry:ConfigFilePath")) is { ModelRoles: not null } savedConfig)
+    {
+        resolvedModelRoles = savedConfig.ModelRoles;
+    }
+    ApplyModelRoles(psi, resolvedModelRoles);
+
     Process claude;
     try
     {
@@ -746,6 +759,30 @@ static ChatMessage ToChatMessage(OpenAiMessage message) => message.Role switch
     "assistant" => new AssistantChatMessage(message.Content),
     _ => new UserChatMessage(message.Content),
 };
+
+static void ApplyModelRoles(ProcessStartInfo psi, Dictionary<string, string>? roles)
+{
+    if (roles is null) return;
+
+    // Maps config key → ANTHROPIC_DEFAULT_*_MODEL env var name
+    var roleVarMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Sonnet"] = "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        ["Haiku"]  = "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ["Opus"]   = "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        ["Fable"]  = "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    };
+
+    foreach (var (role, deployment) in roles)
+    {
+        if (!roleVarMap.TryGetValue(role, out var envVar)) continue;
+        // Caller's env vars always win — only inject if not already set.
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(envVar)))
+        {
+            psi.Environment[envVar] = deployment;
+        }
+    }
+}
 
 internal sealed record DeploymentInfo(string Deployment);
 

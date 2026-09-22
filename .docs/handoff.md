@@ -4,69 +4,59 @@
 AFClaude is a local proxy that lets Claude Code (and MCP clients) run against Azure AI Foundry deployments — both native Anthropic (Claude) deployments via a passthrough, and OpenAI-compatible deployments via an Anthropic↔OpenAI bridge.
 
 ## Current State
-**v0.7.0, 116 tests, all green.** `main` == `origin/main` at `f9eeeb7` (Phase 14.1 docs commit).
-No code changes this session — deployment management and documentation only.
+**v0.8.0, 125 tests, all green.** `main` == `origin/main` at `4fccd49`. CI publishing v0.8.0 to NuGet.
 
 ## qhub-sweden Resource Inventory (updated 2026-09-22)
-Subscription: FNZ Q-Hub Azure (`c83a19df-6be1-4eba-9505-9ab469177af5`)  
-Resource endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`  
-**All deployments: `GlobalStandard` (pay-per-token, zero standing cost). No PTU/provisioned deployments exist.**
+Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`  
+**All GlobalStandard (PAYG/serverless). Zero standing cost when idle.**
 
-| Deployment | Model | Version | Context | Notes |
-|-----------|-------|---------|---------|-------|
-| `claude-sonnet-5` | claude-sonnet-5 | **v2** ✅ | 1M | Upgraded this session |
-| `claude-opus-5` | claude-opus-5 | **v2** ✅ | 1M | New this session |
-| `claude-haiku-4-5` | claude-haiku-4-5 | **v2** ✅ | 200K | Delete+recreate this session (was 20251001, non-upgradable) |
-| `claude-fable-5-1` | claude-fable-5-1 | v1 | — | New this session (Preview) |
-| `gpt-6-astra` | gpt-6-astra | 2026-09-03 | — | New this session; EU data residency |
-| `gpt-5.6-sol` | gpt-5.6-sol | 2026-07-09 | — | New this session |
-| `gpt-5.6-terra` | gpt-5.6-terra | 2026-07-09 | — | Pre-existing |
-| `gpt-5.6-luna` | gpt-5.6-luna | 2026-07-09 | — | Pre-existing |
-| `claude-sonnet-4-6` | claude-sonnet-4-6 | v1 | 200K | Legacy, pre-existing |
-| `claude-opus-4-6` | claude-opus-4-6 | v1 | 200K | Legacy, pre-existing |
-| `grok-4-1-fast-reasoning` | grok-4-1-fast-reasoning | v1 | — | Pre-existing |
-| `DeepSeek-V4-Pro` | DeepSeek-V4-Pro | 2026-04-23 | — | Pre-existing |
-| `Kimi-K2.6` | Kimi-K2.6 | 2026-04-20 | — | Pre-existing |
-| `gpt-realtime-mini` | gpt-realtime-mini | 2025-12-15 | — | Pre-existing |
-| `text-embedding-3-large` | text-embedding-3-large | v1 | — | Standard SKU |
-| `text-embedding-3-small` | text-embedding-3-small | v1 | — | Pre-existing |
+| Deployment | Model | Version | Context |
+|-----------|-------|---------|---------|
+| `claude-sonnet-5` | claude-sonnet-5 | **v2** | 1M ✅ |
+| `claude-opus-5` | claude-opus-5 | **v2** | 1M ✅ |
+| `claude-haiku-4-5` | claude-haiku-4-5 | **v2** | 200K |
+| `claude-fable-5-1` | claude-fable-5-1 | v1 (Preview) | — |
+| `gpt-6-astra` | gpt-6-astra | 2026-09-03 | — |
+| `gpt-5.6-sol/terra/luna` | gpt-5.6-* | 2026-07-09 | — |
+| `claude-sonnet-4-6`, `claude-opus-4-6` | — | v1 | 200K (legacy) |
+| grok, DeepSeek, Kimi, realtime, embeddings | — | various | — |
 
-## Billing Clarification (confirmed this session)
-- `GlobalStandard` = pay-per-token (serverless). Capacity number = TPM rate limit, not reserved compute. **No hourly charge when idle.**
-- `GlobalProvisionedManaged` / `ProvisionedManaged` = PTU (hourly charge regardless of usage). **None of these exist in qhub-sweden.**
-- The user confirmed they want serverless only; all new deployments comply.
-
-## Recommended PowerShell Quick-Start
+## Recommended Quick-Start
 ```powershell
-$env:Foundry__Endpoint              = "https://qhub-sweden.cognitiveservices.azure.com/"
-$env:Foundry__Deployment            = "claude-sonnet-5"
-$env:ANTHROPIC_DEFAULT_SONNET_MODEL = "claude-sonnet-5"
-$env:ANTHROPIC_DEFAULT_HAIKU_MODEL  = "claude-haiku-4-5"
-$env:ANTHROPIC_DEFAULT_OPUS_MODEL   = "claude-opus-5"
-$env:ANTHROPIC_DEFAULT_FABLE_MODEL  = "claude-fable-5-1"
-dnx AFClaude -y -- launch
+$env:Foundry__Endpoint   = "https://qhub-sweden.cognitiveservices.azure.com/"
+$env:Foundry__Deployment = "claude-sonnet-5"
+dnx AFClaude -y -- launch --select   # first time: runs wizard, saves config with ModelRoles
+dnx AFClaude -y -- launch            # subsequent: loads saved config, injects model role vars
 ```
 
-## What This Session Did
-- Checked Sweden Central model catalogue; identified available versions of opus, haiku, fable, astra, sol
-- Deployed: `claude-opus-5` v2, `claude-fable-5-1` v1, `gpt-6-astra`, `gpt-5.6-sol`
-- Upgraded: `claude-sonnet-5` v1→v2 (in-place), `claude-haiku-4-5` 20251001→v2 (delete+recreate, in-place blocked)
-- Confirmed all deployments are GlobalStandard (PAYG/serverless, no standing cost)
-- Updated `qhub-sweden-setup.md` artifact with full inventory and quick-start commands
+The wizard now offers to configure model role aliases at the end of the setup flow.
+Saved config with `ModelRoles` means `ANTHROPIC_DEFAULT_SONNET/HAIKU/OPUS/FABLE_MODEL`
+are injected automatically at every launch — no manual env-var management needed.
+
+## What This Session Did (Phase 14.2)
+- `FoundryConfig` gained optional `ModelRoles` dictionary (`Sonnet`/`Haiku`/`Opus`/`Fable` → deployment name)
+- `ApplyModelRoles` in `Program.cs` injects `ANTHROPIC_DEFAULT_*_MODEL` env vars before spawning `claude`; caller env vars always win
+- `FoundryConfigWizard` extended with `OfferConfigureModelRoles` (interactive per-role picker with auto-suggestions) and `SuggestRole` (pure pattern-matching, testable)
+- README: interactive setup section rewritten as numbered steps, saved config example updated, launch section documents injected vars
+- PLAN.md: 14.2 marked DONE, PLAN.md + HANDOFF.md updated
+- 8 new tests (125 total, all green); v0.8.0 tagged and pushed (CI publishing to NuGet)
+
+## Key Decisions Made
+- Used env-var injection approach (option 3) rather than building a proxy-level model router or Foundry Model Router — simpler, zero new infrastructure, works because all deployments are on the same resource
+- `<skip>` placed last in role picker so Enter immediately selects the suggested deployment
+- Deployments listed before `<skip>` in wizard; lexicographically highest deployment name wins for each role (so `claude-sonnet-5` beats `claude-sonnet-4-6`)
+- Caller env vars always override injected `ModelRoles` — safe to layer on top of existing scripts
+
+## Open Items (in priority order)
+1. **Live-verify v0.8.0**: run `--select`, confirm role wizard appears, confirm `ANTHROPIC_DEFAULT_*_MODEL` vars are visible in a trace session
+2. **Deploy `claude-opus-4-8`** as backup if `claude-opus-5` proves too expensive for routine use
+3. **Phase 14.3** — history `server_tool_use`/result block stripping: if a resumed conversation has history referencing a stripped tool type (e.g. `advisor_20260301`), Foundry may 400 even though the tool def is no longer in the request. Unverified; needs a traced resumed session.
+4. **Evaluate `claude-fable-5-1` and `gpt-6-astra`** — what are they actually good for? Try agentic tasks.
+5. Consider wizard preset profiles: "Claude Full Stack" auto-fills all 4 roles from the resource's deployments without prompting per-role.
 
 ## Important Context
-- Windows dev box; `az` logged in to FNZ Q-Hub subscription.
-- `main` pushed directly; no PR flow.
-- Tests: `CurrentDirectoryTestCollection` for config file tests.
-- `AFClaude__TraceDir` for wire-level diagnosis.
-- Saved config files from ≤v0.6.1 wizard have explicit `"MaxTokensParam": "legacy"` — won't self-heal until `--select` or manual edit to `"auto"`.
-- `claude-haiku-4-5` v2 was still in `Creating` state when this handoff was written — should be `Succeeded` within a few minutes.
-
-## Next Steps (in order)
-1. **Live-verify** v0.7.0 against `claude-sonnet-5` v2: launch Claude Code, confirm advisor-tool 400 absorbed, confirm 1M context window is in effect (check `CLAUDE_CODE_AUTO_COMPACT_WINDOW` isn't forcing early compaction).
-2. **Live-verify** `opusplan` with `claude-opus-5` v2: set both `ANTHROPIC_DEFAULT_OPUS_MODEL` + `ANTHROPIC_DEFAULT_SONNET_MODEL`, run `/model opusplan` in-session.
-3. **Evaluate `claude-fable-5-1`** — what is it good for? Try a long-running agentic task.
-4. **Evaluate `gpt-6-astra`** — test through AFClaude bridge path; check if it needs `MaxTokensParam: new` (will self-heal on first request if so).
-5. **Phase 14.2** — decide on multi-deployment routing: AFClaude router vs Foundry Model Router vs env-var only.
-6. **Phase 14.3** — history block stripping for resumed sessions with stripped tool types.
-7. **Consider retiring** `claude-sonnet-4-6` and `claude-opus-4-6` once newer versions are confirmed stable.
+- Windows dev box; push directly to `main`; no PR flow
+- Tests that touch config files: `CurrentDirectoryTestCollection`
+- `AFClaude__TraceDir` for wire-level diagnosis
+- Saved configs from ≤v0.6.1 have `"MaxTokensParam": "legacy"` — won't self-heal; run `--select` to regenerate
+- `claude-haiku-4-5` v2 was deployed with delete+recreate (in-place upgrade blocked by Azure)

@@ -840,25 +840,37 @@ deployed in the Foundry portal).
   AFClaude's single-deployment limitation and the Foundry Model Router alternative.
 - Status section updated to reflect v0.7.0 and the full feature set.
 
-### 14.2 — Multi-deployment router — NOT STARTED
+### 14.2 — Multi-deployment router via model role aliases — DONE
 
-**Open question:** should AFClaude act as a model-aware router that dispatches
-requests to different Foundry deployments based on the `model` field in the request
-body, allowing Claude Code's `/model` switching to work transparently across Sonnet,
-Haiku, and Opus deployments?
+Chose option 3 (env-var injection from saved config) over options 1 and 2 — no AFClaude
+model router or Foundry Model Router needed, because all the Claude deployments are on
+the same `qhub-sweden` resource and `ANTHROPIC_DEFAULT_*_MODEL` env vars, when set to
+the exact deployment names, cause Claude Code to rewrite the `model` field in each
+request; Foundry answers for any deployment on that resource regardless of what
+`Foundry__Deployment` (the primary) is set to.
 
-Options:
-1. **Route by `model` field** (AFClaude change): read multiple
-   `Foundry__Deployments__<alias>` entries, match the incoming `model` field, proxy
-   to the matching endpoint. Fallback to the primary `Foundry__Deployment` for
-   unmatched values.
-2. **Foundry Model Router** (no AFClaude change): deploy a Model Router endpoint in
-   Foundry that routes across all Claude models behind a single endpoint. Claude Code
-   sees one deployment name; Foundry handles dispatch.
-3. **Env-var only** (current status): users set `ANTHROPIC_DEFAULT_*_MODEL` to their
-   deployment names; Claude Code rewrites the `model` field in each request; AFClaude
-   passes it through unchanged. Works as long as the primary Foundry resource answers
-   for all deployment names sent — which it does when they're all on the same resource.
+`FoundryConfig` gained `ModelRoles` (optional `Dictionary<string,string>?`, keys
+`Sonnet`/`Haiku`/`Opus`/`Fable`). Null by default — existing saved files without
+this field load fine.
+
+`ApplyModelRoles` in `Program.cs` reads `ModelRoles` from the resolved config and
+injects `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`,
+`ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_FABLE_MODEL` into claude's
+`ProcessStartInfo.Environment` before spawn. Caller's own env vars always win.
+
+`FoundryConfigWizard` extended with two new internal methods:
+- `OfferConfigureModelRoles`: after the API probe step, offers Yes/No; on Yes shows
+  a per-role picker for all 4 roles with deployments listed before `<skip>` so Enter
+  selects the suggested deployment directly. Auto-suggests via `SuggestRole`.
+- `SuggestRole`: pure name-pattern matching, lexicographically highest match among
+  deployments whose name contains the role keyword (case-insensitive). `claude-sonnet-5`
+  beats `claude-sonnet-4-6` for the Sonnet role.
+
+README updated: interactive setup section rewritten as numbered steps 1–4, saved
+config JSON example updated to include `ModelRoles`, launch section documents all
+env vars now injected.
+
+8 new tests (125 total); tagged v0.8.0 and published to NuGet.
 
 ### 14.3 — History `server_tool_use`/result block stripping — NOT STARTED
 

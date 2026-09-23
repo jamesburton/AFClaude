@@ -4,7 +4,7 @@
 AFClaude is a local proxy that lets Claude Code (and MCP clients) run against Azure AI Foundry deployments — both native Anthropic (Claude) deployments via a passthrough, and OpenAI-compatible deployments via an Anthropic↔OpenAI bridge.
 
 ## Current State
-**v0.9.4 in progress, 179 tests, all green.** Known model group onboarding, recommended-first selection sorting, statusline progress bar fix, model `[1m]` suffix handling, 1M context auto-compaction window injection, and history `server_tool_use` sanitization completed.
+**v0.9.4, 179 tests, all green.** Known model group onboarding, recommended-first selection sorting, statusline progress bar fix, model `[1m]` suffix handling, 1M context auto-compaction window injection, and history `server_tool_use` sanitization completed.
 
 ## qhub-sweden Resource Inventory
 Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`  

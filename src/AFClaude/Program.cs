@@ -87,6 +87,11 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     var foundry = FoundryClientFactory.Create(config); // fail fast before starting anything
     var deployment = foundry.Deployment;
 
+    // Load the saved config once — used for both the HTTP proxy (ModelNameAliases) and
+    // claude's process environment (ModelRoles). Both are optional; a missing or absent
+    // config file just means neither feature is active this run.
+    var savedConfig = FoundryConfigFile.TryLoad(launchOverrides.GetValueOrDefault("Foundry:ConfigFilePath"));
+
     // Both spellings: AFClaude__Launch__Port (documented) and Launch__Port. Unset ->
     // bind to port 0 (OS-assigned) rather than a fixed default: Windows reserves
     // arbitrary TCP port ranges per machine/reboot (observed live: Hyper-V/WSL NAT
@@ -97,7 +102,8 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     var configuredPort = config.GetValue<int?>("AFClaude:Launch:Port") ?? config.GetValue<int?>("Launch:Port");
     var bindUrl = $"http://127.0.0.1:{configuredPort ?? 0}";
 
-    var app = BuildHttpApp([], bindUrl, foundry, quietLogging: true);
+    var app = BuildHttpApp([], bindUrl, foundry, quietLogging: true,
+        modelNameAliases: savedConfig?.ModelNameAliases);
     try
     {
         await app.StartAsync();
@@ -149,18 +155,8 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     psi.Environment["ANTHROPIC_API_KEY"] = "afclaude-local";
     psi.Environment["ANTHROPIC_MODEL"] = deployment;
 
-    // Inject model role aliases from the resolved config's ModelRoles, if present.
-    // These drive Claude Code's /model switching and background-task model selection
-    // (ANTHROPIC_DEFAULT_SONNET_MODEL etc.). Only set each var when it isn't already
-    // in the caller's environment — explicit env vars always win.
-    var resolvedModelRoles = launchOverrides.TryGetValue("Foundry:ModelRoles", out var rolesJson) && rolesJson is not null
-        ? JsonSerializer.Deserialize<Dictionary<string, string>>(rolesJson, JsonSerializerOptions.Web)
-        : null;
-    if (resolvedModelRoles is null && FoundryConfigFile.TryLoad(launchOverrides.GetValueOrDefault("Foundry:ConfigFilePath")) is { ModelRoles: not null } savedConfig)
-    {
-        resolvedModelRoles = savedConfig.ModelRoles;
-    }
-    ApplyModelRoles(psi, resolvedModelRoles);
+    // Inject ANTHROPIC_DEFAULT_*_MODEL from ModelRoles; caller env vars always win.
+    ApplyModelRoles(psi, savedConfig?.ModelRoles);
 
     Process claude;
     try
@@ -278,12 +274,15 @@ static async Task<WebApplication> BuildHttpAppAsync(string[] args)
     }
 
     var foundry = FoundryClientFactory.Create(builder.Configuration);
-    return BuildHttpApp(args, foundry: foundry, prebuiltBuilder: builder);
+    var savedConfig = FoundryConfigFile.TryLoad(overrides.GetValueOrDefault("Foundry:ConfigFilePath"));
+    return BuildHttpApp(args, foundry: foundry, prebuiltBuilder: builder,
+        modelNameAliases: savedConfig?.ModelNameAliases);
 }
 
 static WebApplication BuildHttpApp(
     string[] args, string? bindUrl = null, FoundryClient? foundry = null,
-    WebApplicationBuilder? prebuiltBuilder = null, bool quietLogging = false)
+    WebApplicationBuilder? prebuiltBuilder = null, bool quietLogging = false,
+    IReadOnlyDictionary<string, string>? modelNameAliases = null)
 {
     var builder = prebuiltBuilder ?? WebApplication.CreateBuilder(args);
     if (bindUrl is not null)
@@ -308,6 +307,9 @@ static WebApplication BuildHttpApp(
     builder.Services.AddSingleton(foundry.ChatClient);
     builder.Services.AddSingleton(new DeploymentInfo(foundry.Deployment));
     builder.Services.AddSingleton(new RequestTrace(builder.Configuration["AFClaude:TraceDir"]));
+    // ModelAliasConfig: rewrites the model name in bridge-path responses so Claude Code
+    // applies the correct context window for otherwise-unknown OpenAI deployments.
+    builder.Services.AddSingleton(ModelAliasConfig.From(modelNameAliases));
 
     var app = builder.Build();
 
@@ -410,6 +412,7 @@ static WebApplication BuildHttpApp(
         FoundryClient foundry,
         ChatClient chatClient,
         DeploymentInfo info,
+        ModelAliasConfig aliases,
         RequestTrace trace,
         ILogger<Program> logger,
         CancellationToken cancellationToken) =>
@@ -481,7 +484,11 @@ static WebApplication BuildHttpApp(
         }
 
         var messageId = $"msg_{Guid.NewGuid():N}";
-        var model = string.IsNullOrEmpty(request.Model) ? info.Deployment : request.Model;
+        // Apply model name alias: rewrites the response model field so Claude Code treats
+        // this as a known model with a defined context window (e.g. "gpt-6-astra" →
+        // "claude-sonnet-5" enables 1M-context compaction thresholds). Native Anthropic
+        // responses are forwarded byte-faithfully above — alias only applies here.
+        var model = aliases.Resolve(string.IsNullOrEmpty(request.Model) ? info.Deployment : request.Model);
 
         if (request.Stream)
         {
@@ -782,6 +789,21 @@ static void ApplyModelRoles(ProcessStartInfo psi, Dictionary<string, string>? ro
             psi.Environment[envVar] = deployment;
         }
     }
+}
+
+// Resolves model name aliases for the bridge path: rewrites the model name in responses
+// so Claude Code can apply the correct context window for OpenAI deployments it wouldn't
+// otherwise know about. Empty by default — no rewriting, existing behaviour unchanged.
+internal sealed class ModelAliasConfig(IReadOnlyDictionary<string, string> aliases)
+{
+    public static readonly ModelAliasConfig Empty = new(new Dictionary<string, string>());
+
+    public static ModelAliasConfig From(IReadOnlyDictionary<string, string>? aliases) =>
+        aliases is { Count: > 0 } ? new(aliases) : Empty;
+
+    // Returns the alias if configured for this model name, otherwise the name unchanged.
+    public string Resolve(string modelName) =>
+        aliases.TryGetValue(modelName, out var alias) ? alias : modelName;
 }
 
 internal sealed record DeploymentInfo(string Deployment);

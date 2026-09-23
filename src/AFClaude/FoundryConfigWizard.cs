@@ -50,7 +50,12 @@ internal static class FoundryConfigWizard
         // Auto-suggested by name pattern (e.g. "claude-sonnet-5" → Sonnet role).
         var modelRoles = OfferConfigureModelRoles(console, deployments, deployment.Name);
 
-        var config = new FoundryConfig(resource.Endpoint, deployment.Name, api, maxTokensParam, modelRoles);
+        // Model name aliases: for any non-Claude deployments used in model roles, offer to
+        // rewrite the model name in bridge responses so Claude Code applies the right
+        // context window (e.g. "gpt-6-astra" → "claude-sonnet-5" for 1M treatment).
+        var modelNameAliases = OfferConfigureModelNameAliases(console, modelRoles, deployments);
+
+        var config = new FoundryConfig(resource.Endpoint, deployment.Name, api, maxTokensParam, modelRoles, modelNameAliases);
         var savedPath = OfferSave(console, config, suggestedSaveFileName);
         return new FoundryWizardResult(config, savedPath);
     }
@@ -186,6 +191,82 @@ internal static class FoundryConfigWizard
             .ToList();
         return matches.FirstOrDefault();
     }
+
+    // For any non-Claude deployments in modelRoles, offers to configure a response
+    // model name alias — what model name Claude Code sees in the bridge response.
+    // Rewriting to a known 1M-context Claude model (e.g. "gpt-6-astra" → "claude-sonnet-5")
+    // lets Claude Code apply correct compaction thresholds instead of a conservative default.
+    // Skipped automatically when all roles use Anthropic deployments (already works correctly).
+    // Exposed internal so tests can drive it with a TestConsole.
+    internal static Dictionary<string, string>? OfferConfigureModelNameAliases(
+        IAnsiConsole console,
+        Dictionary<string, string>? modelRoles,
+        IReadOnlyList<AzDeployment> deployments)
+    {
+        if (modelRoles is null || modelRoles.Count == 0) return null;
+
+        // Find roles mapped to non-Anthropic deployments (format != "Anthropic").
+        var nonClaudeRoles = modelRoles
+            .Where(kv =>
+            {
+                var dep = deployments.FirstOrDefault(d => d.Name == kv.Value);
+                return dep is not null && !IsAnthropicDeployment(dep);
+            })
+            .ToList();
+
+        if (nonClaudeRoles.Count == 0) return null; // all roles are Claude — no aliases needed
+
+        var configure = console.Prompt(
+            new SelectionPrompt<string>()
+                .Title("Configure response model name aliases? ([grey]Lets Claude Code apply 1M-context limits to non-Claude deployments[/])")
+                .AddChoices("Yes — configure aliases", "No — skip"));
+
+        if (configure.StartsWith("No")) return null;
+
+        // Suggest only Anthropic-format deployments as alias targets.
+        var anthropicNames = deployments
+            .Where(IsAnthropicDeployment)
+            .Select(d => d.Name)
+            .ToList();
+
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        console.MarkupLine("[grey]Select which Claude model name each OpenAI deployment should appear as in responses.[/]");
+
+        foreach (var (role, deploymentName) in nonClaudeRoles)
+        {
+            if (anthropicNames.Count == 0)
+            {
+                console.MarkupLine($"[yellow]No Anthropic deployments found on this resource to alias {deploymentName} to — skipping.[/]");
+                continue;
+            }
+
+            var suggested = SuggestRole(role, anthropicNames);
+            var choices = anthropicNames.Concat(new[] { "<no alias>" }).ToList();
+
+            var picked = console.Prompt(
+                new SelectionPrompt<string>()
+                    .Title($"  [bold]{deploymentName}[/] ([grey]{role} role[/]) → appear as:")
+                    .AddChoices(choices)
+                    .UseConverter(c => c == "<no alias>" ? "[grey]<no alias — Claude Code uses actual model name>[/]" :
+                        c == suggested ? $"{c} [grey](suggested)[/]" : c));
+
+            if (picked != "<no alias>")
+            {
+                result[deploymentName] = picked;
+            }
+        }
+
+        return result.Count > 0 ? result : null;
+    }
+
+    // True when a deployment is confirmed Anthropic-format (from the Format field in
+    // the az CLI response), or when Format is absent but the name contains "claude"
+    // (fallback for older az output or hand-crafted test data).
+    private static bool IsAnthropicDeployment(AzDeployment d) =>
+        d.Properties.Model.Format is string fmt
+            ? fmt.Equals("Anthropic", StringComparison.OrdinalIgnoreCase)
+            : d.Name.Contains("claude", StringComparison.OrdinalIgnoreCase);
 
     // Reuses FoundryClientFactory.Create + the existing FoundryApiResolver rather than
     // reimplementing the probe: exercises the same code path launch mode's warm-up does.

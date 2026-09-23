@@ -14,7 +14,7 @@ internal sealed record AzCognitiveServicesAccount(
     public string Endpoint => Properties.Endpoint;
 }
 
-internal sealed record AzDeploymentModel(string Name, string Version);
+internal sealed record AzDeploymentModel(string Name, string Version, string? Format = null);
 
 internal sealed record AzDeploymentProperties(AzDeploymentModel Model);
 

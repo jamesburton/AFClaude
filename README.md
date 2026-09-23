@@ -108,14 +108,20 @@ Saved config files are plain JSON:
     "Haiku":  "claude-haiku-4-5",
     "Opus":   "claude-opus-5",
     "Fable":  "claude-fable-5-1"
+  },
+  "ModelNameAliases": {
+    "gpt-6-astra": "claude-sonnet-5"
   }
 }
 ```
 
-`MaxTokensParam` and `ModelRoles` are both optional — older saved files without them
-load fine and behave as before. An explicit `legacy` or `new` for `MaxTokensParam`
-pins the field and disables self-healing. Keep multiple config files (one per
-deployment or model set) and switch between them with `--config <file>`.
+All fields except `Endpoint` and `Deployment` are optional — older saved files without them load fine and behave as before.
+
+- **`ModelRoles`** — maps Claude Code's internal role names (`Sonnet`/`Haiku`/`Opus`/`Fable`) to Foundry deployment names. AFClaude injects the corresponding `ANTHROPIC_DEFAULT_*_MODEL` env vars into `claude`'s process, enabling in-session `/model` switching and background-task model selection without manual env-var management.
+- **`ModelNameAliases`** — rewrites the `model` field in bridge-path responses (OpenAI-compatible deployments only). Claude Code determines compaction thresholds from the model name it sees in responses; unknown names like `gpt-6-astra` fall back to a conservative default. Aliasing to `claude-sonnet-5` tells Claude Code to apply the 1M-context limit instead. Native Anthropic (Claude) passthrough responses are forwarded byte-faithfully — they already carry the correct model name.
+- **`MaxTokensParam`** — see `Foundry__MaxTokensParam` above. `auto` (default) self-heals; `legacy`/`new` pin explicitly.
+
+Keep multiple config files (one per deployment or model set) and switch between them with `--config <file>`.
 
 Env vars always take priority over a saved config file for any key they set.
 Explicit `ANTHROPIC_DEFAULT_*_MODEL` env vars in the caller's environment always

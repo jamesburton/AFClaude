@@ -16,8 +16,16 @@ namespace AFClaude;
 // without manual env-var management. Keys: "Sonnet", "Haiku", "Opus", "Fable".
 // Null (the default) means no role aliases are configured — existing saved files
 // without this field continue to work as before.
+// ModelNameAliases maps incoming request model names to the model name returned in
+// bridge-path responses. This lets Claude Code treat an OpenAI deployment (e.g.
+// "gpt-6-astra") as a known model with a defined context window (e.g. "claude-sonnet-5"),
+// preventing early compaction on models whose context window Claude Code doesn't know.
+// Only affects the OpenAI bridge path — native Anthropic passthrough responses are
+// forwarded byte-faithfully and already carry the correct Claude model name.
+// Null (the default) means no rewriting — existing saved files continue to work as before.
 internal sealed record FoundryConfig(string Endpoint, string Deployment, string Api, string MaxTokensParam = "auto",
-    Dictionary<string, string>? ModelRoles = null);
+    Dictionary<string, string>? ModelRoles = null,
+    Dictionary<string, string>? ModelNameAliases = null);
 
 internal static class FoundryConfigFile
 {

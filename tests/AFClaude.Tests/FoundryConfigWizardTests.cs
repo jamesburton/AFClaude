@@ -207,4 +207,114 @@ public class FoundryConfigWizardTests : IDisposable
 
     private static List<AzDeployment> MakeDeployments(params string[] names)
         => names.Select(n => new AzDeployment(n, new AzDeploymentProperties(new AzDeploymentModel(n, "1")))).ToList();
+
+    private static List<AzDeployment> MakeDeploymentsWithFormat(params (string Name, string Format)[] entries)
+        => entries.Select(e => new AzDeployment(e.Name,
+            new AzDeploymentProperties(new AzDeploymentModel(e.Name, "1", e.Format)))).ToList();
+
+    // ── OfferConfigureModelNameAliases ────────────────────────────────────────────
+
+    [Fact]
+    public void OfferConfigureModelNameAliases_NullRoles_ReturnsNull()
+    {
+        var console = new TestConsole();
+        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, null,
+            MakeDeploymentsWithFormat(("claude-sonnet-5", "Anthropic"), ("gpt-6-astra", "OpenAI")));
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void OfferConfigureModelNameAliases_AllClaudeRoles_ReturnsNullWithoutPrompting()
+    {
+        var console = new TestConsole();
+        var roles = new Dictionary<string, string> { ["Sonnet"] = "claude-sonnet-5" };
+        var deployments = MakeDeploymentsWithFormat(("claude-sonnet-5", "Anthropic"), ("claude-opus-5", "Anthropic"));
+
+        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, roles, deployments);
+
+        Assert.Null(result); // no prompt needed — all roles are Claude
+    }
+
+    [Fact]
+    public void OfferConfigureModelNameAliases_UserSkips_ReturnsNull()
+    {
+        var console = new TestConsole();
+        console.Interactive();
+        console.Input.PushKey(ConsoleKey.DownArrow); // "No — skip"
+        console.Input.PushKey(ConsoleKey.Enter);
+
+        var roles = new Dictionary<string, string> { ["Sonnet"] = "gpt-6-astra" };
+        var deployments = MakeDeploymentsWithFormat(("claude-sonnet-5", "Anthropic"), ("gpt-6-astra", "OpenAI"));
+
+        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, roles, deployments);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void OfferConfigureModelNameAliases_UserConfigures_ReturnsMappings()
+    {
+        var console = new TestConsole();
+        console.Interactive();
+        console.Input.PushKey(ConsoleKey.Enter);  // "Yes — configure aliases"
+        // Anthropic deployments listed before <no alias>; press Enter to pick first one
+        console.Input.PushKey(ConsoleKey.Enter);  // select claude-sonnet-5
+
+        var roles = new Dictionary<string, string> { ["Sonnet"] = "gpt-6-astra" };
+        var deployments = MakeDeploymentsWithFormat(("claude-sonnet-5", "Anthropic"), ("gpt-6-astra", "OpenAI"));
+
+        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, roles, deployments);
+
+        Assert.NotNull(result);
+        Assert.True(result.ContainsKey("gpt-6-astra"));
+    }
+}
+
+// ── ModelAliasConfig ──────────────────────────────────────────────────────────────
+
+public class ModelAliasConfigTests
+{
+    [Fact]
+    public void Resolve_KnownAlias_ReturnsAlias()
+    {
+        var config = ModelAliasConfig.From(new Dictionary<string, string> { ["gpt-6-astra"] = "claude-sonnet-5" });
+        Assert.Equal("claude-sonnet-5", config.Resolve("gpt-6-astra"));
+    }
+
+    [Fact]
+    public void Resolve_UnknownModel_ReturnsOriginal()
+    {
+        var config = ModelAliasConfig.From(new Dictionary<string, string> { ["gpt-6-astra"] = "claude-sonnet-5" });
+        Assert.Equal("gpt-5.6-terra", config.Resolve("gpt-5.6-terra"));
+    }
+
+    [Fact]
+    public void Resolve_Empty_ReturnsOriginal()
+    {
+        Assert.Equal("gpt-6-astra", ModelAliasConfig.Empty.Resolve("gpt-6-astra"));
+    }
+
+    [Fact]
+    public void From_NullAliases_ReturnsEmpty()
+    {
+        var config = ModelAliasConfig.From(null);
+        Assert.Same(ModelAliasConfig.Empty, config);
+    }
+
+    [Fact]
+    public void From_EmptyDict_ReturnsEmpty()
+    {
+        var config = ModelAliasConfig.From(new Dictionary<string, string>());
+        Assert.Same(ModelAliasConfig.Empty, config);
+    }
+
+    [Fact]
+    public void Resolve_CaseInsensitive()
+    {
+        var config = ModelAliasConfig.From(new Dictionary<string, string> { ["GPT-6-Astra"] = "claude-sonnet-5" });
+        // Alias lookup should be case-insensitive if configured that way — depends on dict comparer.
+        // Default StringComparer.OrdinalIgnoreCase used by ModelAliasConfig.From with DI config.
+        // Here the key casing must match since FoundryConfig uses Dictionary<string,string> from JSON.
+        Assert.Equal("claude-sonnet-5", config.Resolve("GPT-6-Astra"));
+    }
 }

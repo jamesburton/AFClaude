@@ -17,8 +17,10 @@ Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`
 | `claude-haiku-4-5` | claude-haiku-4-5 | v2 | 200K | — (native passthrough) |
 | `claude-fable-5-1` | claude-fable-5-1 | v1 (Preview) | 1M+ tier | — (native passthrough with [1m] designation) |
 | `gpt-6-astra` | gpt-6-astra | 2026-09-03 | frontier tier | `claude-fable-5-1` |
+| `gpt-6-sol` | gpt-6-sol | 2026-09-22 | deep reasoning tier | `claude-opus-5` |
 | `gpt-5.6-sol` | gpt-5.6-sol | 2026-07-09 | deep reasoning tier | `claude-opus-5` |
 | `gpt-5.6-terra` | gpt-5.6-terra | 2026-07-09 | balanced tier | `claude-sonnet-5` |
+| `gpt-6-luna` | gpt-6-luna | 2026-09-22 | fast tier | `claude-haiku-4-5` (200K window notice) |
 | `gpt-5.6-luna` | gpt-5.6-luna | 2026-07-09 | fast tier | `claude-haiku-4-5` (200K window notice) |
 | `grok-4-1-fast-reasoning` | grok-4-1-fast-reasoning | v1 | reasoning tier | `claude-opus-5` |
 | `DeepSeek-V4-Pro` | DeepSeek-V4-Pro | 2026-04-23 | balanced tier | `claude-sonnet-5` |

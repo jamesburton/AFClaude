@@ -22,10 +22,12 @@ namespace AFClaude;
 // preventing early compaction on models whose context window Claude Code doesn't know.
 // Only affects the OpenAI bridge path — native Anthropic passthrough responses are
 // forwarded byte-faithfully and already carry the correct Claude model name.
-// Null (the default) means no rewriting — existing saved files continue to work as before.
+// AutoCompactWindow: token threshold for Claude Code context compaction (e.g. 900000).
+// When null (default), AFClaude auto-detects if 1M models are in use and defaults to 900000.
 internal sealed record FoundryConfig(string Endpoint, string Deployment, string Api, string MaxTokensParam = "auto",
     Dictionary<string, string>? ModelRoles = null,
-    Dictionary<string, string>? ModelNameAliases = null);
+    Dictionary<string, string>? ModelNameAliases = null,
+    int? AutoCompactWindow = null);
 
 internal static class FoundryConfigFile
 {

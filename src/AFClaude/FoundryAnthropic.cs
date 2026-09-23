@@ -247,6 +247,7 @@ internal sealed class FoundryAnthropicClient(
                         obj.Remove(key);
                     }
                     dropped.AddRange(DropUnsupportedTools(obj));
+                    dropped.AddRange(SanitizeHistoryServerToolUse(obj));
                     if (dropped.Count > 0)
                     {
                         onDroppedFields?.Invoke(dropped);
@@ -294,5 +295,102 @@ internal sealed class FoundryAnthropicClient(
             body["tool_choice"] = new JsonObject { ["type"] = "auto" };
         }
         return unsupported.Select(t => $"tools[{t!["type"]}]");
+    }
+
+    // Sanitizes messages history by converting server_tool_use blocks with names not
+    // supported by Foundry (e.g. advisor_20260301) and their corresponding tool_result blocks
+    // into standard text blocks. Foundry's strict validator 400s if a history turn contains
+    // an unknown server_tool_use name ("Input should be 'web_search', 'web_fetch'...").
+    private IEnumerable<string> SanitizeHistoryServerToolUse(JsonObject body)
+    {
+        if (body["messages"] is not JsonArray messages)
+        {
+            return [];
+        }
+
+        var allowed = _learner.AllowedServerTools;
+        var sanitized = new List<string>();
+        var unsupportedToolUseIds = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var msgNode in messages)
+        {
+            if (msgNode is not JsonObject msg) continue;
+            if (msg["content"] is not JsonArray content) continue;
+
+            for (var i = 0; i < content.Count; i++)
+            {
+                if (content[i] is not JsonObject block) continue;
+
+                var type = block["type"]?.GetValue<string>();
+                var isServerTool = type == "server_tool_use" || block.ContainsKey("server_tool_use");
+                if (isServerTool)
+                {
+                    var toolName = block["name"]?.GetValue<string>()
+                        ?? block["server_tool_use"]?["name"]?.GetValue<string>();
+
+                    if (!string.IsNullOrEmpty(toolName) && !allowed.Contains(toolName))
+                    {
+                        var toolId = block["id"]?.GetValue<string>()
+                            ?? block["server_tool_use"]?["id"]?.GetValue<string>()
+                            ?? "";
+
+                        if (!string.IsNullOrEmpty(toolId))
+                        {
+                            unsupportedToolUseIds[toolId] = toolName;
+                        }
+
+                        // Convert to standard text block so the transcript remains human/model-readable
+                        // without failing Foundry's server_tool_use.name enum validation.
+                        var inputStr = block["input"]?.ToJsonString() ?? block["server_tool_use"]?["input"]?.ToJsonString() ?? "";
+                        var textContent = string.IsNullOrEmpty(inputStr) || inputStr == "{}"
+                            ? $"[Server tool call: {toolName}]"
+                            : $"[Server tool call: {toolName} {inputStr}]";
+
+                        content[i] = new JsonObject
+                        {
+                            ["type"] = "text",
+                            ["text"] = textContent,
+                        };
+                        sanitized.Add($"messages[*].server_tool_use[{toolName}]");
+                    }
+                }
+            }
+        }
+
+        // If we converted any server_tool_use blocks, also convert matching tool_result /
+        // server_tool_result blocks in subsequent messages so Foundry doesn't reject
+        // orphaned tool_use_ids.
+        if (unsupportedToolUseIds.Count > 0)
+        {
+            foreach (var msgNode in messages)
+            {
+                if (msgNode is not JsonObject msg) continue;
+                if (msg["content"] is not JsonArray content) continue;
+
+                for (var i = 0; i < content.Count; i++)
+                {
+                    if (content[i] is not JsonObject block) continue;
+
+                    var toolUseId = block["tool_use_id"]?.GetValue<string>()
+                        ?? block["server_tool_result"]?["tool_use_id"]?.GetValue<string>();
+
+                    if (!string.IsNullOrEmpty(toolUseId) && unsupportedToolUseIds.TryGetValue(toolUseId, out var toolName))
+                    {
+                        var resultContent = block["content"]?.ToJsonString()
+                            ?? block["server_tool_result"]?["content"]?.ToJsonString()
+                            ?? "";
+
+                        content[i] = new JsonObject
+                        {
+                            ["type"] = "text",
+                            ["text"] = $"[Server tool result for {toolName}: {resultContent}]",
+                        };
+                        sanitized.Add($"messages[*].tool_result[{toolName}]");
+                    }
+                }
+            }
+        }
+
+        return sanitized;
     }
 }

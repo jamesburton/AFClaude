@@ -4,7 +4,7 @@
 AFClaude is a local proxy that lets Claude Code (and MCP clients) run against Azure AI Foundry deployments — both native Anthropic (Claude) deployments via a passthrough, and OpenAI-compatible deployments via an Anthropic↔OpenAI bridge.
 
 ## Current State
-**v0.9.1, 144 tests, all green.** Model capability equivalence mappings for longer-context models published.
+**v0.9.2, 160 tests, all green.** History `server_tool_use` sanitization (Phase 14.4) and automatic 1M context auto-compaction window injection completed.
 
 ## qhub-sweden Resource Inventory
 Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`  
@@ -31,17 +31,18 @@ Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`
 # First time — runs wizard, saves config with ModelRoles + ModelNameAliases
 dnx AFClaude -y -- launch --select
 
-# Subsequent launches — loads saved config, injects env vars, applies aliases
+# Subsequent launches — loads saved config, injects env vars, applies aliases & 1M compaction window
 dnx AFClaude -y -- launch
 ```
 
-## Saved Config Format (with Equivalence Aliases)
+## Saved Config Format (v0.9.2)
 ```json
 {
   "Endpoint": "https://qhub-sweden.cognitiveservices.azure.com/",
   "Deployment": "claude-sonnet-5",
   "Api": "anthropic",
   "MaxTokensParam": "auto",
+  "AutoCompactWindow": 900000,
   "ModelRoles": {
     "Sonnet": "claude-sonnet-5",
     "Haiku":  "claude-haiku-4-5",
@@ -66,7 +67,7 @@ dnx AFClaude -y -- launch
 - `luna` → `claude-haiku-4-5` (fast tier; 200K window)
 - `grok` → `claude-opus-5`, `deepseek`/`kimi` → `claude-sonnet-5`
 
-Native Anthropic passthrough is byte-faithful and unaffected.
+**`AutoCompactWindow`** — configures token threshold for compaction. When 1M models are in use, AFClaude defaults `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to `900000` automatically so Claude Code does not default to 200k.
 
 ## Recent Progress Summary
 
@@ -77,26 +78,23 @@ Native Anthropic passthrough is byte-faithful and unaffected.
 ### Phase 14.3 (v0.9.0 & Capability Equivalences)
 - `FoundryConfig.ModelNameAliases` + `ModelAliasConfig` (DI singleton).
 - Bridge-path `/v1/messages` handler rewrites `model` field in responses.
-- Extended wizard to suggest aliases for **all** non-Claude deployments on the resource.
-- Introduced `SuggestAliasFor` with a dedicated capability equivalence table:
-  - `astra` → `fable`
-  - `sol` → `opus`
-  - `terra` → `sonnet`
-  - `luna` → `haiku` (with a context window notice in the UI)
-  - `grok` → `opus`, `deepseek`/`kimi` → `sonnet`
-- Test suite expanded to 144 passing unit tests covering all pattern matches and fallbacks.
+- Extended wizard to suggest aliases for all non-Claude deployments on the resource.
+- Introduced `SuggestAliasFor` with dedicated capability equivalence table.
+
+### Phase 14.4 (v0.9.2)
+- **Resolved History `server_tool_use` Validation Error during `/compact`**: `FoundryAnthropic.SanitizeHistoryServerToolUse` converts unknown server tools (e.g. `advisor_20260301`) and their corresponding tool result blocks in messages history into standard `text` blocks, bypassing Foundry's strict server-tool enum validator while preserving conversational context.
+- **Resolved Short Context / 200k Default on 1M Models**: `LaunchEnvironment.ApplyAutoCompactWindow` automatically sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000` when 1M models (`sonnet-5`, `opus-5`, `fable`, or aliased targets) are in use unless already set in caller environment.
+- Test suite expanded to 160 tests, all green.
 
 ## Key Design Decisions
 - Equivalence matching uses deployment name patterns (`astra`, `sol`, `terra`, `luna`) and prioritizes the highest matching version (`claude-sonnet-5` beats `4-6`).
-- Aliasing operates across all non-Claude deployments present on the resource, not just those currently selected in `ModelRoles`.
-- Native Anthropic passthrough remains byte-faithful and unmodified.
-- When `luna` is aliased to `haiku`, a console notice highlights that Haiku 4.5 is a 200K context model.
+- Unknown server tool calls in history are converted to `[Server tool call: <name> ...]` text blocks rather than dropped, keeping message turn parity and transcript readability for summary generation.
+- Caller env vars always override injected `ANTHROPIC_DEFAULT_*_MODEL` and `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
 
 ## Open Items & Future Plans
-1. **Live-verify v0.9.0+ wizard** — run `dnx AFClaude -y -- launch --select` on qhub-sweden to test interactive auto-suggestions for all GPT models.
-2. **Phase 14.4** — history `server_tool_use`/result block stripping (verify if resumed sessions with stripped tool definitions trigger validation 400s in Foundry).
-3. **Evaluate `gpt-6-astra` and `gpt-5.6-sol` tool calling fidelity** — run E2E tool tests with Claude Code in bridge mode to check if 2026 OpenAI models avoid the plain-text tool fabrication seen in gpt-4.1.
-4. **`claude-fable-5-1` evaluation** — explore performance differences on complex tasks compared to Sonnet and Opus.
+1. **Live-verify v0.9.2** — test `/compact` in a long session to confirm successful compaction without the 400 validation error, and check `/autocompact` to confirm the 900,000 token window.
+2. **Evaluate `gpt-6-astra` and `gpt-5.6-sol` tool calling fidelity** — run E2E tool tests with Claude Code in bridge mode.
+3. **`claude-fable-5-1` evaluation** — explore performance differences on complex tasks compared to Sonnet and Opus.
 
 ## Billing Reminder
 All qhub-sweden deployments are `GlobalStandard` = PAYG. No standing hourly cost.

@@ -75,4 +75,14 @@ public class FoundryRejectionLearnerTests
     {
         Assert.False(new FoundryRejectionLearner().TryLearn("messages: at least one message is required"));
     }
+
+    [Fact]
+    public void ServerToolUseNameRejection_LearnsAllowedServerTools()
+    {
+        var learner = new FoundryRejectionLearner();
+        const string error = "messages.143.content.1.server_tool_use.name: Input should be 'web_search', 'web_fetch', 'code_execution'";
+
+        Assert.True(learner.TryLearn(error));
+        Assert.Equal(["code_execution", "web_fetch", "web_search"], learner.AllowedServerTools.Order());
+    }
 }

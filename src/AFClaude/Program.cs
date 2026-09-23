@@ -158,6 +158,10 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     // Inject ANTHROPIC_DEFAULT_*_MODEL from ModelRoles; caller env vars always win.
     ApplyModelRoles(psi, savedConfig?.ModelRoles);
 
+    // Inject CLAUDE_CODE_AUTO_COMPACT_WINDOW: Claude Code defaults to compacting at 200k tokens
+    // unless CLAUDE_CODE_AUTO_COMPACT_WINDOW is set. If a 1M model is configured, default to 900000.
+    LaunchEnvironment.ApplyAutoCompactWindow(psi, savedConfig, deployment);
+
     Process claude;
     try
     {
@@ -788,6 +792,50 @@ static void ApplyModelRoles(ProcessStartInfo psi, Dictionary<string, string>? ro
         {
             psi.Environment[envVar] = deployment;
         }
+    }
+}
+
+internal static class LaunchEnvironment
+{
+    public static void ApplyAutoCompactWindow(
+        ProcessStartInfo psi,
+        FoundryConfig? config,
+        string primaryDeployment)
+    {
+        const string compactVar = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(compactVar)))
+        {
+            return; // Caller's env var always wins
+        }
+
+        if (config?.AutoCompactWindow is int customWindow)
+        {
+            psi.Environment[compactVar] = customWindow.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return;
+        }
+
+        // Auto-detect 1M models in use (primary deployment, model roles, or alias targets).
+        // If any 1M model is detected, default to 900,000 tokens so Claude Code actually
+        // uses the 1M window rather than compacting prematurely at 200k.
+        var has1M = IsLongContextModel(primaryDeployment)
+            || (config?.ModelRoles?.Values.Any(IsLongContextModel) ?? false)
+            || (config?.ModelNameAliases?.Values.Any(IsLongContextModel) ?? false);
+
+        if (has1M)
+        {
+            psi.Environment[compactVar] = "900000";
+        }
+    }
+
+    public static bool IsLongContextModel(string? modelName)
+    {
+        if (string.IsNullOrWhiteSpace(modelName)) return false;
+        var lower = modelName.ToLowerInvariant();
+        return lower.Contains("sonnet-5")
+            || lower.Contains("opus-5")
+            || lower.Contains("opus-4-8")
+            || lower.Contains("opus-4-7")
+            || lower.Contains("fable");
     }
 }
 

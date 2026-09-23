@@ -127,7 +127,7 @@ All fields except `Endpoint` and `Deployment` are optional — older saved files
   - `terra` → `claude-sonnet-5` (balanced 1M-context tier)
   - `luna` → `claude-haiku-4-5` (fast tier; note Haiku 4.5 is a 200K window)
   - `grok` → `claude-opus-5`, `deepseek`/`kimi` → `claude-sonnet-5`
-  Native Anthropic (Claude) passthrough responses are forwarded byte-faithfully — they already carry the correct model name.
+- **`AutoCompactWindow`** — integer token threshold for Claude Code context compaction (e.g. `900000`). By default, Claude Code compacts at 200,000 tokens unless `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is set. When unset in config, AFClaude automatically detects if a 1M model is configured (such as `claude-sonnet-5`, `claude-opus-5`, `claude-fable-5-1`, or aliased targets) and injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000` at launch so Claude Code utilizes the full 1M context. Any explicit `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env var in the caller's environment always takes precedence.
 - **`MaxTokensParam`** — see `Foundry__MaxTokensParam` above. `auto` (default) self-heals; `legacy`/`new` pin explicitly.
 
 Keep multiple config files (one per deployment or model set) and switch between them with `--config <file>`.

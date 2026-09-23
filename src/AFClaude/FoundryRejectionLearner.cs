@@ -32,6 +32,21 @@ internal sealed partial class FoundryRejectionLearner
         "web_search_20250305", "web_search_20260209", "web_search_20260318",
     };
 
+    // Fallback for when Foundry rejects a server_tool_use name in messages history.
+    // Copied from live Foundry error: "server_tool_use.name: Input should be 'web_search',
+    // 'web_fetch', 'code_execution', 'bash_code_execution', 'text_editor_code_execution',
+    // 'tool_search_tool_regex', 'tool_search_tool_bm25'".
+    internal static readonly IReadOnlySet<string> AllowedServerToolNames = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "web_search",
+        "web_fetch",
+        "code_execution",
+        "bash_code_execution",
+        "text_editor_code_execution",
+        "tool_search_tool_regex",
+        "tool_search_tool_bm25",
+    };
+
     // Never learned as droppable: without these the request is meaningless, so a
     // rejection naming one is a real error to surface, not something to strip.
     private static readonly HashSet<string> RequiredFields = new(StringComparer.Ordinal)
@@ -41,6 +56,7 @@ internal sealed partial class FoundryRejectionLearner
 
     private readonly object _lock = new();
     private IReadOnlySet<string>? _acceptedToolTypes;
+    private IReadOnlySet<string>? _allowedServerTools;
     private readonly HashSet<string> _rejectedFields = new(StringComparer.Ordinal);
 
     /// <summary>
@@ -54,6 +70,21 @@ internal sealed partial class FoundryRejectionLearner
             lock (_lock)
             {
                 return _acceptedToolTypes;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Server tool names Foundry accepts in messages history (e.g. web_search, code_execution).
+    /// Defaults to <see cref="AllowedServerToolNames"/>.
+    /// </summary>
+    public IReadOnlySet<string> AllowedServerTools
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _allowedServerTools ?? AllowedServerToolNames;
             }
         }
     }
@@ -105,6 +136,19 @@ internal sealed partial class FoundryRejectionLearner
                 }
             }
 
+            var serverToolMatch = ServerToolUseNameRejection().Match(errorText);
+            if (serverToolMatch.Success)
+            {
+                var expected = QuotedTag().Matches(serverToolMatch.Groups["expected"].Value)
+                    .Select(m => m.Groups[1].Value)
+                    .ToHashSet(StringComparer.Ordinal);
+                if (expected.Count > 0 && (_allowedServerTools is null || !_allowedServerTools.SetEquals(expected)))
+                {
+                    _allowedServerTools = expected;
+                    learned = true;
+                }
+            }
+
             foreach (Match field in ExtraFieldRejection().Matches(errorText))
             {
                 var name = field.Groups["field"].Value;
@@ -121,6 +165,9 @@ internal sealed partial class FoundryRejectionLearner
     // break keeps it inside the JSON string it's embedded in.
     [GeneratedRegex("""Input tag '(?<tag>[^']+)' found using 'type' does not match any of the expected tags:(?<expected>[^"\r\n]*)""")]
     private static partial Regex ToolTagRejection();
+
+    [GeneratedRegex(@"server_tool_use\.name:\s*Input should be (?<expected>[^""\r\n]+)")]
+    private static partial Regex ServerToolUseNameRejection();
 
     [GeneratedRegex("'([^']+)'")]
     private static partial Regex QuotedTag();

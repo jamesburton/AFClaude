@@ -897,14 +897,20 @@ Key implementation details:
 - Unit tests expanded with `SuggestAliasFor_KnownEquivalences_ReturnsBestMatch` (144 total tests, all green).
 - README: saved config JSON example updated with `ModelNameAliases` showing capability tier mappings, per-field descriptions.
 
-### 14.4 — History `server_tool_use`/result block stripping — NOT STARTED
+### 14.4 — History `server_tool_use`/result block sanitization & 1M context compaction — DONE
 
-When a `server_tool_use` tool is stripped from the `tools` list (e.g. `advisor_20260301`
-per Phase 13.6/13.7), a resumed conversation whose `messages` history contains prior
-`server_tool_use` content blocks and matching `tool_result` blocks for that tool type
-may still 400 — Foundry may reject history blocks referring to an unsupported tool
-type even when it's no longer in the `tools` array. Unverified; needs a traced
-resumed session as evidence.
+**Problem 1 (Tool Call Validation 400 during Compaction):**
+When a `server_tool_use` tool (e.g. `advisor_20260301`) is called earlier in a conversation, its invocation block remains in the local transcript. When Claude Code executes `/compact`, it sends the entire transcript in `messages`. Foundry's hosted Claude endpoint strictly validates `server_tool_use.name`, requiring it to match a fixed whitelist (`web_search`, `web_fetch`, `code_execution`, `bash_code_execution`, `text_editor_code_execution`, `tool_search_tool_regex`, `tool_search_tool_bm25`) and returns HTTP 400 (`messages.<index>.content.<subindex>.server_tool_use.name: Input should be ...`).
+
+**Problem 2 (Premature Compaction for 1M Models):**
+Claude Code defaults to a 200,000 token context compaction window regardless of whether the underlying model or response alias supports 1M tokens, unless `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is set in the environment or configuration.
+
+**Resolution:**
+- `FoundryAnthropic.cs`: Added `SanitizeHistoryServerToolUse(JsonObject body)`. When `bodyMode == BodyStrict`, iterates through `messages` and converts any `server_tool_use` blocks with names not in Foundry's whitelist into standard `text` blocks (`[Server tool call: <name> ...]`). Concurrently identifies their `tool_use_id` and converts any matching `tool_result`/`server_tool_result` blocks into standard `text` blocks as well, preventing orphaned tool ID validation errors while preserving semantic history for the model's compaction summary.
+- `FoundryRejectionLearner.cs`: Added `AllowedServerToolNames` list and `ServerToolUseNameRejection` regex to dynamically learn allowed server tool names if Foundry returns a validation 400, enabling reactive retry.
+- `LaunchEnvironment`: Added `ApplyAutoCompactWindow` and `IsLongContextModel` helper. When launching Claude Code with a 1M model configured (primary deployment, model role, or alias target like `claude-sonnet-5`, `claude-opus-5`, `claude-fable-5-1`), AFClaude automatically injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000` into `claude`'s process if not already set.
+- `FoundryConfig`: Added optional `AutoCompactWindow: int? = null` property to support explicit overrides in config files.
+- Unit tests: Added tests in `FoundryAnthropicTests.cs`, `FoundryRejectionLearnerTests.cs`, and `FoundryConfigWizardTests.cs` (160 tests total, all passing).
 
 ## Explicitly out of scope for now
 

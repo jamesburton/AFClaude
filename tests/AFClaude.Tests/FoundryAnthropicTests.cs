@@ -288,6 +288,66 @@ public class FoundryAnthropicTests
         Assert.Equal("Hello world", await client.AskAsync("hi", CancellationToken.None));
     }
 
+    [Fact]
+    public void PrepareBody_SanitizesUnsupportedServerToolUseAndResultInHistory()
+    {
+        var client = new FoundryAnthropicClient(
+            new HttpClient(new CapturingHandler(HttpStatusCode.OK, "{}")),
+            new Uri("https://r.example/"), "dep", new StaticCredential("t"),
+            bodyMode: FoundryAnthropicClient.BodyStrict);
+
+        var rawBody = """
+        {
+          "model": "claude-sonnet-5",
+          "messages": [
+            {
+              "role": "assistant",
+              "content": [
+                { "type": "text", "text": "Let me advise." },
+                { "type": "server_tool_use", "id": "srv_1", "name": "advisor_20260301", "input": {"query":"test"} },
+                { "type": "server_tool_use", "id": "srv_2", "name": "web_search", "input": {"query":"dotnet"} }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                { "type": "tool_result", "tool_use_id": "srv_1", "content": "advisory note" },
+                { "type": "tool_result", "tool_use_id": "srv_2", "content": "search results" }
+              ]
+            }
+          ]
+        }
+        """;
+
+        var dropped = new List<string>();
+        var sanitized = client.PrepareBody(rawBody, d => dropped = d.ToList());
+
+        using var doc = JsonDocument.Parse(sanitized);
+        var messages = doc.RootElement.GetProperty("messages");
+
+        // Assistant content
+        var assistantContent = messages[0].GetProperty("content");
+        Assert.Equal(3, assistantContent.GetArrayLength());
+        // block 1: converted to text
+        Assert.Equal("text", assistantContent[1].GetProperty("type").GetString());
+        Assert.Contains("advisor_20260301", assistantContent[1].GetProperty("text").GetString());
+        // block 2: allowed server tool remains server_tool_use
+        Assert.Equal("server_tool_use", assistantContent[2].GetProperty("type").GetString());
+        Assert.Equal("web_search", assistantContent[2].GetProperty("name").GetString());
+
+        // User content
+        var userContent = messages[1].GetProperty("content");
+        Assert.Equal(2, userContent.GetArrayLength());
+        // block 0: tool_result matching srv_1 converted to text
+        Assert.Equal("text", userContent[0].GetProperty("type").GetString());
+        Assert.Contains("advisory note", userContent[0].GetProperty("text").GetString());
+        // block 1: tool_result matching web_search remains tool_result
+        Assert.Equal("tool_result", userContent[1].GetProperty("type").GetString());
+
+        Assert.Contains("messages[*].server_tool_use[advisor_20260301]", dropped);
+        Assert.Contains("messages[*].tool_result[advisor_20260301]", dropped);
+    }
+
     private sealed class StaticCredential(string token) : TokenCredential
     {
         public override AccessToken GetToken(TokenRequestContext requestContext, CancellationToken cancellationToken)

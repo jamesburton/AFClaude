@@ -341,3 +341,69 @@ public class ModelAliasConfigTests
         Assert.Equal("claude-sonnet-5", config.Resolve("GPT-6-Astra"));
     }
 }
+
+// ── AutoCompactWindowTests ────────────────────────────────────────────────────────
+
+public class AutoCompactWindowTests
+{
+    [Theory]
+    [InlineData("claude-sonnet-5", true)]
+    [InlineData("claude-opus-5", true)]
+    [InlineData("claude-opus-4-8", true)]
+    [InlineData("claude-opus-4-7", true)]
+    [InlineData("claude-fable-5-1", true)]
+    [InlineData("claude-haiku-4-5", false)]
+    [InlineData("claude-sonnet-4-6", false)]
+    [InlineData("gpt-4o-mini", false)]
+    [InlineData(null, false)]
+    public void IsLongContextModel_Identifies1MModels(string? model, bool expected)
+    {
+        Assert.Equal(expected, LaunchEnvironment.IsLongContextModel(model));
+    }
+
+    [Fact]
+    public void ApplyAutoCompactWindow_1MModel_Sets900000ByDefault()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo();
+        LaunchEnvironment.ApplyAutoCompactWindow(psi, null, "claude-sonnet-5");
+        Assert.Equal("900000", psi.Environment["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]);
+    }
+
+    [Fact]
+    public void ApplyAutoCompactWindow_1MRole_Sets900000()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo();
+        var config = new FoundryConfig("https://example/", "other", "anthropic",
+            ModelRoles: new Dictionary<string, string> { ["Sonnet"] = "claude-sonnet-5" });
+        LaunchEnvironment.ApplyAutoCompactWindow(psi, config, "other");
+        Assert.Equal("900000", psi.Environment["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]);
+    }
+
+    [Fact]
+    public void ApplyAutoCompactWindow_1MAlias_Sets900000()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo();
+        var config = new FoundryConfig("https://example/", "gpt-6-astra", "openai",
+            ModelNameAliases: new Dictionary<string, string> { ["gpt-6-astra"] = "claude-fable-5-1" });
+        LaunchEnvironment.ApplyAutoCompactWindow(psi, config, "gpt-6-astra");
+        Assert.Equal("900000", psi.Environment["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]);
+    }
+
+    [Fact]
+    public void ApplyAutoCompactWindow_ExplicitConfigWindow_TakesPrecedence()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo();
+        var config = new FoundryConfig("https://example/", "claude-sonnet-5", "anthropic",
+            AutoCompactWindow: 800000);
+        LaunchEnvironment.ApplyAutoCompactWindow(psi, config, "claude-sonnet-5");
+        Assert.Equal("800000", psi.Environment["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]);
+    }
+
+    [Fact]
+    public void ApplyAutoCompactWindow_Non1MModel_DoesNotSet()
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo();
+        LaunchEnvironment.ApplyAutoCompactWindow(psi, null, "claude-haiku-4-5");
+        Assert.False(psi.Environment.ContainsKey("CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+    }
+}

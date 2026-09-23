@@ -4,7 +4,7 @@
 AFClaude is a local proxy that lets Claude Code (and MCP clients) run against Azure AI Foundry deployments — both native Anthropic (Claude) deployments via a passthrough, and OpenAI-compatible deployments via an Anthropic↔OpenAI bridge.
 
 ## Current State
-**v0.9.4, 179 tests, all green.** Known model group onboarding, recommended-first selection sorting, statusline progress bar fix, model `[1m]` suffix handling, 1M context auto-compaction window injection, and history `server_tool_use` sanitization completed.
+**v0.9.4 published to NuGet, 179 tests, all green.** Streamlined known model group onboarding, recommended-first selection sorting, statusline progress bar calculation fix, model `[1m]` suffix handling, 1M context auto-compaction window injection, and history `server_tool_use` sanitization completed. `gpt-6-sol` and `gpt-6-luna` deployed to `qhub-sweden`.
 
 ## qhub-sweden Resource Inventory
 Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`  
@@ -30,14 +30,14 @@ Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`
 
 ## Quick-Start
 ```powershell
-# First time — runs wizard, saves config with ModelRoles + ModelNameAliases
+# First time or reconfigure — runs wizard, detects groups, saves config with ModelRoles + ModelNameAliases
 dnx AFClaude -y -- launch --select
 
 # Subsequent launches — loads saved config, injects env vars, applies aliases & 1M compaction window
 dnx AFClaude -y -- launch
 ```
 
-## Saved Config Format (v0.9.3)
+## Saved Config Format (v0.9.4)
 ```json
 {
   "Endpoint": "https://qhub-sweden.cognitiveservices.azure.com/",
@@ -53,9 +53,9 @@ dnx AFClaude -y -- launch
   },
   "ModelNameAliases": {
     "gpt-6-astra": "claude-fable-5-1",
-    "gpt-5.6-sol": "claude-opus-5",
+    "gpt-6-sol": "claude-opus-5",
     "gpt-5.6-terra": "claude-sonnet-5",
-    "gpt-5.6-luna": "claude-haiku-4-5"
+    "gpt-6-luna": "claude-haiku-4-5"
   }
 }
 ```
@@ -115,22 +115,23 @@ dnx AFClaude -y -- launch
     - Role and alias picker: Suggested deployment / alias `(suggested)` first.
 - **Default Aliases for OpenAI Groups**:
   - `BuildDefaultModelNameAliases` automatically maps OpenAI deployments to Claude counterparts so Claude Code treats them with appropriate context windows and role mapping without tedious per-model prompts.
-- **Azure SwedenCentral Model Availability Findings (2026-09-23)**:
-  - `gpt-6-sol` (version 2026-09-22) and `gpt-6-luna` (version 2026-09-22) released yesterday on GlobalStandard PAYG. Available to be deployed to `qhub-sweden`.
-  - `gpt-6-astra` (version 2026-09-03) is already deployed.
-  - `gpt-5.6-terra` (version 2026-07-09) is the current terra version (no `gpt-6-terra` on Azure yet).
-  - `claude-opus-5-5` (version 2, GA) is also available on GlobalStandard.
+- **Azure SwedenCentral Deployments**:
+  - `gpt-6-sol` (version `2026-09-22`) and `gpt-6-luna` (version `2026-09-22`) deployed to `qhub-sweden` on `GlobalStandard` PAYG.
+  - `claude-opus-5-5` (version `2`, GA) identified as available for future deployment if needed.
 - Test suite expanded to 179 tests (10 new tests), all passing.
+- Tagged `v0.9.4` and published to NuGet via GitHub Actions CI.
 
 ## Key Design Decisions
-- Equivalence matching uses deployment name patterns (`astra`, `sol`, `terra`, `luna`) and prioritizes the highest matching version (`claude-sonnet-5` beats `4-6`).
+- Equivalence matching uses deployment name patterns (`astra`, `sol`, `terra`, `luna`) and prioritizes the highest matching version (`claude-sonnet-5` beats `4-6`, `gpt-6-sol` beats `gpt-5.6-sol`).
 - Unknown server tool calls in history are converted to `[Server tool call: <name> ...]` text blocks rather than dropped, keeping message turn parity and transcript readability for summary generation.
 - Caller env vars always override injected `ANTHROPIC_DEFAULT_*_MODEL` and `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
 
 ## Open Items & Future Plans
-1. **Live-verify v0.9.2** — test `/compact` in a long session to confirm successful compaction without the 400 validation error, and check `/autocompact` to confirm the 900,000 token window.
-2. **Evaluate `gpt-6-astra` and `gpt-5.6-sol` tool calling fidelity** — run E2E tool tests with Claude Code in bridge mode.
-3. **`claude-fable-5-1` evaluation** — explore performance differences on complex tasks compared to Sonnet and Opus.
+1. **Live-verify v0.9.4 wizard**: Test `dnx AFClaude -y -- launch --select` to verify the streamlined group picker (`Anthropic` vs `OpenAI` vs `Custom`), active model selection, and automatic alias assignment with the new `gpt-6-sol`/`gpt-6-luna` deployments.
+2. **Context & Compaction Live Verification**: Confirm `/compact` runs cleanly without 400 errors, `/autocompact` respects the 900,000 threshold on 1M models, and the statusline progress bar tracks accurately in long sessions.
+3. **Evaluate `gpt-6-astra` and `gpt-6-sol` in Bridge Mode**: Test agentic tool calling fidelity, reasoning performance, and response latency compared to native Claude passthrough.
+4. **`claude-fable-5-1` evaluation**: Explore performance differences on complex tasks compared to Sonnet and Opus.
+5. **Evaluate `claude-opus-5-5`**: Deploy and evaluate `claude-opus-5-5` (v2 GA) on `qhub-sweden` if extended reasoning exceeds `claude-opus-5` capabilities.
 
 ## Billing Reminder
 All qhub-sweden deployments are `GlobalStandard` = PAYG. No standing hourly cost.

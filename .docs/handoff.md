@@ -90,6 +90,12 @@ dnx AFClaude -y -- launch
   - `FoundryClientFactory` and `PrepareBody` transparently strip `[1m]` so Foundry receives clean Azure deployment names.
 - Test suite expanded to 169 tests, all green.
 
+### Phase 14.5 (Context Progress Bar Fix)
+- **Resolved 100% Context Progress Bar Issue**:
+  - **Root Cause**: The statusline hook (`C:\Users\james\.claude\hooks\gsd-statusline.js`) had an inverted calculation when `CLAUDE_CODE_AUTO_COMPACT_WINDOW` was set. It calculated `AUTO_COMPACT_BUFFER_PCT = (acw / totalCtx) * 100` (evaluating to 90% for a 900k threshold on 1M context), mistakenly treating the compaction threshold as the buffer rather than `(totalCtx - acw) / totalCtx * 100` (10% buffer). Any usage over 10% (remaining <= 90%) caused `usableRemaining` to clamp to `0%`, pegging the statusline meter to `💀 [██████████] 100%`.
+  - **Context Window Property**: In Claude Code v2.1+, the payload property is `data.context_window.context_window_size` rather than `total_tokens`.
+  - **Fix Applied**: Updated `gsd-statusline.js` to recognize `context_window_size` and correctly calculate the autocompact buffer percentage as `((totalCtx - acw) / totalCtx) * 100`. The status bar now accurately reflects 1M usage (e.g., 255k tokens renders as ~29% in green instead of 100% skull).
+
 ## Key Design Decisions
 - Equivalence matching uses deployment name patterns (`astra`, `sol`, `terra`, `luna`) and prioritizes the highest matching version (`claude-sonnet-5` beats `4-6`).
 - Unknown server tool calls in history are converted to `[Server tool call: <name> ...]` text blocks rather than dropped, keeping message turn parity and transcript readability for summary generation.

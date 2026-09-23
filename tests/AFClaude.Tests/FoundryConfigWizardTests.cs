@@ -215,24 +215,14 @@ public class FoundryConfigWizardTests : IDisposable
     // ── OfferConfigureModelNameAliases ────────────────────────────────────────────
 
     [Fact]
-    public void OfferConfigureModelNameAliases_NullRoles_ReturnsNull()
+    public void OfferConfigureModelNameAliases_NoNonClaudeDeployments_ReturnsNull()
     {
         var console = new TestConsole();
-        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, null,
-            MakeDeploymentsWithFormat(("claude-sonnet-5", "Anthropic"), ("gpt-6-astra", "OpenAI")));
-        Assert.Null(result);
-    }
-
-    [Fact]
-    public void OfferConfigureModelNameAliases_AllClaudeRoles_ReturnsNullWithoutPrompting()
-    {
-        var console = new TestConsole();
-        var roles = new Dictionary<string, string> { ["Sonnet"] = "claude-sonnet-5" };
         var deployments = MakeDeploymentsWithFormat(("claude-sonnet-5", "Anthropic"), ("claude-opus-5", "Anthropic"));
 
-        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, roles, deployments);
+        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, null, deployments);
 
-        Assert.Null(result); // no prompt needed — all roles are Claude
+        Assert.Null(result); // no non-Claude deployments → no prompts fired
     }
 
     [Fact]
@@ -243,10 +233,9 @@ public class FoundryConfigWizardTests : IDisposable
         console.Input.PushKey(ConsoleKey.DownArrow); // "No — skip"
         console.Input.PushKey(ConsoleKey.Enter);
 
-        var roles = new Dictionary<string, string> { ["Sonnet"] = "gpt-6-astra" };
         var deployments = MakeDeploymentsWithFormat(("claude-sonnet-5", "Anthropic"), ("gpt-6-astra", "OpenAI"));
 
-        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, roles, deployments);
+        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, null, deployments);
 
         Assert.Null(result);
     }
@@ -257,16 +246,50 @@ public class FoundryConfigWizardTests : IDisposable
         var console = new TestConsole();
         console.Interactive();
         console.Input.PushKey(ConsoleKey.Enter);  // "Yes — configure aliases"
-        // Anthropic deployments listed before <no alias>; press Enter to pick first one
-        console.Input.PushKey(ConsoleKey.Enter);  // select claude-sonnet-5
+        // Anthropic deployments listed before <no alias>; Enter picks first (claude-sonnet-5)
+        console.Input.PushKey(ConsoleKey.Enter);  // select claude-sonnet-5 for gpt-6-astra
 
-        var roles = new Dictionary<string, string> { ["Sonnet"] = "gpt-6-astra" };
         var deployments = MakeDeploymentsWithFormat(("claude-sonnet-5", "Anthropic"), ("gpt-6-astra", "OpenAI"));
 
-        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, roles, deployments);
+        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, null, deployments);
 
         Assert.NotNull(result);
         Assert.True(result.ContainsKey("gpt-6-astra"));
+    }
+
+    [Fact]
+    public void OfferConfigureModelNameAliases_AllClaudeDeployments_ReturnsNullWithoutPrompting()
+    {
+        // Even if ModelRoles maps Sonnet to a Claude deployment, no prompt if no non-Claude deployments exist.
+        var console = new TestConsole();
+        var roles = new Dictionary<string, string> { ["Sonnet"] = "claude-sonnet-5" };
+        var deployments = MakeDeploymentsWithFormat(("claude-sonnet-5", "Anthropic"), ("claude-opus-5", "Anthropic"));
+
+        var result = FoundryConfigWizard.OfferConfigureModelNameAliases(console, roles, deployments);
+
+        Assert.Null(result);
+    }
+
+    // ── SuggestAliasFor via known equivalence table ───────────────────────────────
+
+    [Theory]
+    [InlineData("gpt-6-astra",    null, "claude-fable-5-1")]   // astra → fable tier
+    [InlineData("gpt-5.6-sol",    null, "claude-opus-5")]       // sol → opus tier
+    [InlineData("gpt-5.6-terra",  null, "claude-sonnet-5")]     // terra → sonnet tier
+    [InlineData("gpt-5.6-luna",   null, "claude-haiku-4-5")]    // luna → haiku tier
+    [InlineData("grok-4-1-fast",  null, "claude-opus-5")]       // grok → opus tier
+    [InlineData("DeepSeek-V4",    null, "claude-sonnet-5")]     // deepseek → sonnet
+    [InlineData("Kimi-K2",        null, "claude-sonnet-5")]     // kimi → sonnet
+    [InlineData("custom-model",   "Sonnet", "claude-sonnet-5")] // fallback to role
+    [InlineData("unknown-model",  null, null)]                  // no match
+    public void SuggestAliasFor_KnownEquivalences_ReturnsBestMatch(
+        string deploymentName, string? fallbackRole, string? expectedAlias)
+    {
+        var anthropicNames = new[] { "claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5", "claude-fable-5-1" };
+
+        var match = FoundryConfigWizard.SuggestAliasFor(deploymentName, fallbackRole, anthropicNames);
+
+        Assert.Equal(expectedAlias, match);
     }
 }
 

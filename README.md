@@ -110,7 +110,10 @@ Saved config files are plain JSON:
     "Fable":  "claude-fable-5-1"
   },
   "ModelNameAliases": {
-    "gpt-6-astra": "claude-sonnet-5"
+    "gpt-6-astra": "claude-fable-5-1",
+    "gpt-5.6-sol": "claude-opus-5",
+    "gpt-5.6-terra": "claude-sonnet-5",
+    "gpt-5.6-luna": "claude-haiku-4-5"
   }
 }
 ```
@@ -118,7 +121,13 @@ Saved config files are plain JSON:
 All fields except `Endpoint` and `Deployment` are optional — older saved files without them load fine and behave as before.
 
 - **`ModelRoles`** — maps Claude Code's internal role names (`Sonnet`/`Haiku`/`Opus`/`Fable`) to Foundry deployment names. AFClaude injects the corresponding `ANTHROPIC_DEFAULT_*_MODEL` env vars into `claude`'s process, enabling in-session `/model` switching and background-task model selection without manual env-var management.
-- **`ModelNameAliases`** — rewrites the `model` field in bridge-path responses (OpenAI-compatible deployments only). Claude Code determines compaction thresholds from the model name it sees in responses; unknown names like `gpt-6-astra` fall back to a conservative default. Aliasing to `claude-sonnet-5` tells Claude Code to apply the 1M-context limit instead. Native Anthropic (Claude) passthrough responses are forwarded byte-faithfully — they already carry the correct model name.
+- **`ModelNameAliases`** — rewrites the `model` field in bridge-path responses (OpenAI-compatible deployments only). Claude Code determines compaction thresholds from the model name it sees in responses; unknown names fall back to a conservative default. The setup wizard auto-suggests best-matched equivalents for longer-context deployments on the resource:
+  - `astra` → `claude-fable-5-1` (frontier/agent flagship)
+  - `sol` → `claude-opus-5` (heavy reasoning tier)
+  - `terra` → `claude-sonnet-5` (balanced 1M-context tier)
+  - `luna` → `claude-haiku-4-5` (fast tier; note Haiku 4.5 is a 200K window)
+  - `grok` → `claude-opus-5`, `deepseek`/`kimi` → `claude-sonnet-5`
+  Native Anthropic (Claude) passthrough responses are forwarded byte-faithfully — they already carry the correct model name.
 - **`MaxTokensParam`** — see `Foundry__MaxTokensParam` above. `auto` (default) self-heals; `legacy`/`new` pin explicitly.
 
 Keep multiple config files (one per deployment or model set) and switch between them with `--config <file>`.

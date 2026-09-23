@@ -892,9 +892,10 @@ Key implementation details:
 - Registered in `BuildHttpApp(modelNameAliases:)`; injected into `/v1/messages` handler.
 - Alias applied to `model` variable after early Anthropic-path return — only bridge path.
 - `RunLaunchAsync` refactored to load saved config once (fixes dead ModelRoles-in-overrides check).
-- Wizard: `OfferConfigureModelNameAliases` — after role step, auto-detects non-Claude roles, offers alias picker targeting Anthropic deployments. `IsAnthropicDeployment` helper.
-- 10 new tests (135 total); tagged v0.9.0 and published to NuGet.
-- README: saved config JSON example updated with `ModelNameAliases`, per-field descriptions.
+- Wizard: `OfferConfigureModelNameAliases` offers alias picker across all non-Claude deployments on the resource.
+- `SuggestAliasFor` introduces a capability equivalence table: `astra` → `fable`, `sol` → `opus`, `terra` → `sonnet`, `luna` → `haiku` (200K window notice), `grok` → `opus`, `deepseek`/`kimi` → `sonnet`.
+- Unit tests expanded with `SuggestAliasFor_KnownEquivalences_ReturnsBestMatch` (144 total tests, all green).
+- README: saved config JSON example updated with `ModelNameAliases` showing capability tier mappings, per-field descriptions.
 
 ### 14.4 — History `server_tool_use`/result block stripping — NOT STARTED
 

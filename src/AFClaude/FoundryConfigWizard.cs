@@ -192,72 +192,107 @@ internal static class FoundryConfigWizard
         return matches.FirstOrDefault();
     }
 
-    // For any non-Claude deployments in modelRoles, offers to configure a response
-    // model name alias — what model name Claude Code sees in the bridge response.
-    // Rewriting to a known 1M-context Claude model (e.g. "gpt-6-astra" → "claude-sonnet-5")
-    // lets Claude Code apply correct compaction thresholds instead of a conservative default.
-    // Skipped automatically when all roles use Anthropic deployments (already works correctly).
+    // Offers response model name aliases for ALL non-Claude deployments on the resource —
+    // not just those in ModelRoles — so in-session '/model gpt-6-astra' switching also
+    // benefits. Each alias rewrites the model field in bridge responses so Claude Code
+    // applies a known context window instead of its conservative unknown-model default.
+    // Auto-suggests using known OpenAI→Claude equivalence tiers (astra→fable, sol→opus,
+    // terra→sonnet, luna→haiku) then falls back to the Claude Code role name pattern.
     // Exposed internal so tests can drive it with a TestConsole.
     internal static Dictionary<string, string>? OfferConfigureModelNameAliases(
         IAnsiConsole console,
         Dictionary<string, string>? modelRoles,
         IReadOnlyList<AzDeployment> deployments)
     {
-        if (modelRoles is null || modelRoles.Count == 0) return null;
-
-        // Find roles mapped to non-Anthropic deployments (format != "Anthropic").
-        var nonClaudeRoles = modelRoles
-            .Where(kv =>
-            {
-                var dep = deployments.FirstOrDefault(d => d.Name == kv.Value);
-                return dep is not null && !IsAnthropicDeployment(dep);
-            })
+        // Operate on ALL non-Claude deployments on the resource, not just role-mapped ones.
+        var nonClaudeDeployments = deployments
+            .Where(d => !IsAnthropicDeployment(d))
             .ToList();
 
-        if (nonClaudeRoles.Count == 0) return null; // all roles are Claude — no aliases needed
+        if (nonClaudeDeployments.Count == 0) return null;
 
         var configure = console.Prompt(
             new SelectionPrompt<string>()
-                .Title("Configure response model name aliases? ([grey]Lets Claude Code apply 1M-context limits to non-Claude deployments[/])")
+                .Title("Configure response model name aliases? ([grey]Lets Claude Code apply correct context window limits to non-Claude deployments[/])")
                 .AddChoices("Yes — configure aliases", "No — skip"));
 
         if (configure.StartsWith("No")) return null;
 
-        // Suggest only Anthropic-format deployments as alias targets.
-        var anthropicNames = deployments
-            .Where(IsAnthropicDeployment)
-            .Select(d => d.Name)
-            .ToList();
+        var anthropicDeployments = deployments.Where(IsAnthropicDeployment).ToList();
+        var anthropicNames = anthropicDeployments.Select(d => d.Name).ToList();
+
+        if (anthropicNames.Count == 0)
+        {
+            console.MarkupLine("[yellow]No Claude deployments found on this resource to use as alias targets — skipping.[/]");
+            return null;
+        }
+
+        // Determine what role (if any) each non-Claude deployment fills in ModelRoles,
+        // for use as the fallback suggestion when no name-pattern match is found.
+        var roleByDeployment = (modelRoles ?? new Dictionary<string, string>())
+            .ToDictionary(kv => kv.Value, kv => kv.Key, StringComparer.OrdinalIgnoreCase);
 
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        console.MarkupLine("[grey]Select which Claude model name each OpenAI deployment should appear as in responses.[/]");
+        console.MarkupLine("[grey]Select which Claude model each deployment should appear as in responses.[/]");
+        console.MarkupLine("[grey]Note: claude-haiku-4-5 has a 200K context window (not 1M).[/]");
 
-        foreach (var (role, deploymentName) in nonClaudeRoles)
+        foreach (var dep in nonClaudeDeployments)
         {
-            if (anthropicNames.Count == 0)
-            {
-                console.MarkupLine($"[yellow]No Anthropic deployments found on this resource to alias {deploymentName} to — skipping.[/]");
-                continue;
-            }
-
-            var suggested = SuggestRole(role, anthropicNames);
+            var fallbackRole = roleByDeployment.TryGetValue(dep.Name, out var r) ? r : null;
+            var suggested = SuggestAliasFor(dep.Name, fallbackRole, anthropicNames);
             var choices = anthropicNames.Concat(new[] { "<no alias>" }).ToList();
 
             var picked = console.Prompt(
                 new SelectionPrompt<string>()
-                    .Title($"  [bold]{deploymentName}[/] ([grey]{role} role[/]) → appear as:")
+                    .Title($"  [bold]{dep.Name}[/] → appear as:")
                     .AddChoices(choices)
                     .UseConverter(c => c == "<no alias>" ? "[grey]<no alias — Claude Code uses actual model name>[/]" :
                         c == suggested ? $"{c} [grey](suggested)[/]" : c));
 
             if (picked != "<no alias>")
             {
-                result[deploymentName] = picked;
+                result[dep.Name] = picked;
             }
         }
 
         return result.Count > 0 ? result : null;
+    }
+
+    // Known equivalences between OpenAI model families and Claude capability tiers.
+    // Used to auto-suggest the best alias target for a non-Claude deployment.
+    // astra  (OpenAI frontier / agent flagship) → fable  (Claude frontier)
+    // sol    (OpenAI extended reasoning)         → opus   (Claude heavy reasoning)
+    // terra  (OpenAI balanced coding)            → sonnet (Claude balanced)
+    // luna   (OpenAI fast / light)               → haiku  (Claude fast — 200K, not 1M)
+    // grok   (xAI reasoning)                     → opus   (closest Claude reasoning tier)
+    // kimi/deepseek (third-party balanced)       → sonnet (balanced tier)
+    private static readonly (string Keyword, string ClaudeRole)[] DeploymentEquivalences =
+    [
+        ("astra",    "fable"),
+        ("sol",      "opus"),
+        ("terra",    "sonnet"),
+        ("luna",     "haiku"),
+        ("grok",     "opus"),
+        ("deepseek", "sonnet"),
+        ("kimi",     "sonnet"),
+    ];
+
+    // Returns the best Anthropic alias for an OpenAI deployment name, trying known
+    // equivalence patterns first, then the Claude Code role name, then null.
+    // Internal for direct unit testing of equivalence matching.
+    internal static string? SuggestAliasFor(string deploymentName, string? fallbackRole,
+        IReadOnlyList<string> anthropicNames)
+    {
+        foreach (var (keyword, claudeRole) in DeploymentEquivalences)
+        {
+            if (deploymentName.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                var match = SuggestRole(claudeRole, anthropicNames);
+                if (match is not null) return match;
+            }
+        }
+        return fallbackRole is not null ? SuggestRole(fallbackRole, anthropicNames) : null;
     }
 
     // True when a deployment is confirmed Anthropic-format (from the Format field in

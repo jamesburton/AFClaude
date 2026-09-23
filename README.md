@@ -82,13 +82,16 @@ found — see below), `launch` and `--http` mode drop into an interactive picker
 (`az account list` → `az cognitiveservices account list` → `az cognitiveservices
 account deployment list`) instead of failing fast, as long as a real terminal is
 attached (it never triggers under a redirected stdin/stdout, and never in the default
-MCP stdio mode — Claude launches that one with no operator present). After picking a
-deployment it:
+MCP stdio mode — Claude launches that one with no operator present). It guides setup with a streamlined flow:
 
-1. Probes which API surface the deployment answers on (same logic as `Foundry__Api=auto`)
-2. For OpenAI-compatible deployments, checks `max_tokens` vs `max_completion_tokens` (see `Foundry__MaxTokensParam`)
-3. **Offers to configure model role aliases** — maps Claude Code role names (`Sonnet`, `Haiku`, `Opus`, `Fable`) to specific deployments on the same resource. Auto-suggests by name pattern (e.g. `claude-sonnet-5` → Sonnet role, `claude-opus-5` → Opus role, picking the lexicographically highest match so newer versions win). Each role can be skipped individually. When saved, `launch` injects the corresponding `ANTHROPIC_DEFAULT_*_MODEL` env vars automatically before starting `claude`, so in-session `/model` switching and background-task model selection work without any manual env-var management.
-4. Offers to save the result to a config file
+1. **Known Model Group Detection** — when recognized model tiers exist on the resource, the wizard offers a one-click choice between available groups:
+   - **Anthropic Group** (`fable-5.1`, `opus-5`, `sonnet-5`, and optional `haiku-4.5`)
+   - **OpenAI Group** (`astra`, `sol`, `terra`, and optional `luna`)
+   - **Custom models** (manual selection)
+2. **Active / Start Model Selection** — when a group is chosen, it maps the model roles automatically and lets you select the starting model directly from the mapped group, placing the recommended balanced model (**Sonnet** / **Terra**) at the top of the selection.
+3. **API Surface & Parameter Probing** — probes native Anthropic vs OpenAI bridge, and checks `max_tokens` vs `max_completion_tokens`.
+4. **Response Model Aliases** — automatically maps OpenAI deployments to Claude capability tiers (e.g. `astra` → `claude-fable-5-1`, `terra` → `claude-sonnet-5`) so Claude Code applies full 1M context.
+5. Offers to save the result to a config file.
 
 | Flag | Effect |
 |---|---|

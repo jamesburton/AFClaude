@@ -9,6 +9,47 @@ namespace AFClaude;
 // should persist to.
 internal sealed record FoundryWizardResult(FoundryConfig Config, string? SavedPath);
 
+internal sealed record KnownModelGroup(
+    string Name,
+    string DisplayLabel,
+    string SonnetDeployment,
+    string OpusDeployment,
+    string FableDeployment,
+    string? HaikuDeployment,
+    string Api,
+    bool IsRecommended = false)
+{
+    public Dictionary<string, string> ToModelRoles()
+    {
+        var roles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Sonnet"] = SonnetDeployment,
+            ["Opus"] = OpusDeployment,
+            ["Fable"] = FableDeployment,
+        };
+        if (!string.IsNullOrEmpty(HaikuDeployment))
+        {
+            roles["Haiku"] = HaikuDeployment;
+        }
+        return roles;
+    }
+
+    public IReadOnlyList<(string Role, string Deployment, bool IsRecommended)> GetActiveModelChoices()
+    {
+        var list = new List<(string Role, string Deployment, bool IsRecommended)>
+        {
+            ("Sonnet", SonnetDeployment, true),
+            ("Opus", OpusDeployment, false),
+            ("Fable", FableDeployment, false),
+        };
+        if (!string.IsNullOrEmpty(HaikuDeployment))
+        {
+            list.Add(("Haiku", HaikuDeployment, false));
+        }
+        return list;
+    }
+}
+
 // Interactive subscription -> resource -> deployment picker for launch/--http modes.
 // Only invoked (see Program.cs's ResolveFoundryConfigOverridesAsync) when
 // Foundry__Endpoint/Foundry__Deployment aren't already resolvable some other way and a
@@ -29,16 +70,57 @@ internal static class FoundryConfigWizard
         var resource = PickResource(console, resources);
 
         var deployments = await AzCli.ListDeploymentsAsync(resource.ResourceGroup, resource.Name, azTimeoutSeconds, cancellationToken);
-        var deployment = PickDeployment(console, deployments);
+        if (deployments.Count == 0)
+        {
+            throw new InvalidOperationException("No model deployments found on that resource.");
+        }
+
+        var knownGroups = DetectKnownGroups(deployments);
+        string activeDeploymentName;
+        Dictionary<string, string>? modelRoles = null;
+        Dictionary<string, string>? modelNameAliases = null;
+
+        if (knownGroups.Count > 0)
+        {
+            var chosenGroup = PickModelGroup(console, knownGroups);
+            if (chosenGroup != null)
+            {
+                modelRoles = chosenGroup.ToModelRoles();
+                activeDeploymentName = PickActiveModelFromGroup(console, chosenGroup);
+
+                if (chosenGroup.Api == "openai")
+                {
+                    modelNameAliases = BuildDefaultModelNameAliases(deployments, modelRoles);
+                }
+                else
+                {
+                    modelNameAliases = OfferConfigureModelNameAliases(console, modelRoles, deployments);
+                }
+            }
+            else
+            {
+                var deployment = PickDeployment(console, deployments);
+                activeDeploymentName = deployment.Name;
+            }
+        }
+        else
+        {
+            var deployment = PickDeployment(console, deployments);
+            activeDeploymentName = deployment.Name;
+        }
+
+        if (modelRoles == null)
+        {
+            modelRoles = OfferConfigureModelRoles(console, deployments, activeDeploymentName);
+            modelNameAliases = OfferConfigureModelNameAliases(console, modelRoles, deployments);
+        }
 
         console.MarkupLine("Probing which API surface this deployment answers on...");
-        var (api, probeClient) = await ProbeApiAsync(resource.Endpoint, deployment.Name, cancellationToken);
+        var (api, probeClient) = await ProbeApiAsync(resource.Endpoint, activeDeploymentName, cancellationToken);
         console.MarkupLine(api == "anthropic"
             ? "[green]Detected native Anthropic (Claude) deployment.[/]"
             : "[green]Detected OpenAI-compatible deployment.[/]");
 
-        // MaxTokensParam only matters on the OpenAI bridge -- the native Anthropic
-        // passthrough never touches ChatCompletionOptions at all.
         var maxTokensParam = "auto";
         if (api == "openai")
         {
@@ -46,16 +128,7 @@ internal static class FoundryConfigWizard
             maxTokensParam = await ProbeMaxTokensParamAsync(console, probeClient.ChatClient, cancellationToken);
         }
 
-        // Model role aliases: map Claude Code role names → deployment names on this resource.
-        // Auto-suggested by name pattern (e.g. "claude-sonnet-5" → Sonnet role).
-        var modelRoles = OfferConfigureModelRoles(console, deployments, deployment.Name);
-
-        // Model name aliases: for any non-Claude deployments used in model roles, offer to
-        // rewrite the model name in bridge responses so Claude Code applies the right
-        // context window (e.g. "gpt-6-astra" → "claude-sonnet-5" for 1M treatment).
-        var modelNameAliases = OfferConfigureModelNameAliases(console, modelRoles, deployments);
-
-        var config = new FoundryConfig(resource.Endpoint, deployment.Name, api, maxTokensParam, modelRoles, modelNameAliases);
+        var config = new FoundryConfig(resource.Endpoint, activeDeploymentName, api, maxTokensParam, modelRoles, modelNameAliases);
         var savedPath = OfferSave(console, config, suggestedSaveFileName);
         return new FoundryWizardResult(config, savedPath);
     }
@@ -104,11 +177,177 @@ internal static class FoundryConfigWizard
         {
             return deployments[0];
         }
+        var sorted = SortDeploymentsRecommendedFirst(deployments);
+        var recommended = sorted[0];
+
         return console.Prompt(
             new SelectionPrompt<AzDeployment>()
                 .Title("Select a model deployment:")
-                .UseConverter(d => $"{d.Name} -> {d.ModelName}/{d.ModelVersion}")
-                .AddChoices(deployments));
+                .UseConverter(d => d.Name == recommended.Name
+                    ? $"{d.Name} -> {d.ModelName}/{d.ModelVersion} [green](Recommended)[/]"
+                    : $"{d.Name} -> {d.ModelName}/{d.ModelVersion}")
+                .AddChoices(sorted));
+    }
+
+    internal static IReadOnlyList<AzDeployment> SortDeploymentsRecommendedFirst(IReadOnlyList<AzDeployment> deployments)
+    {
+        if (deployments.Count <= 1) return deployments;
+
+        static int GetRank(AzDeployment d)
+        {
+            var name = d.Name;
+            if (name.Contains("sonnet", StringComparison.OrdinalIgnoreCase)) return 0;
+            if (name.Contains("terra", StringComparison.OrdinalIgnoreCase)) return 1;
+            if (name.Contains("opus", StringComparison.OrdinalIgnoreCase)) return 2;
+            if (name.Contains("sol", StringComparison.OrdinalIgnoreCase)) return 3;
+            if (name.Contains("fable", StringComparison.OrdinalIgnoreCase)) return 4;
+            if (name.Contains("astra", StringComparison.OrdinalIgnoreCase)) return 5;
+            if (name.Contains("haiku", StringComparison.OrdinalIgnoreCase)) return 6;
+            if (name.Contains("luna", StringComparison.OrdinalIgnoreCase)) return 7;
+            if (name.Contains("embedding", StringComparison.OrdinalIgnoreCase)) return 10;
+            return 8;
+        }
+
+        return deployments
+            .OrderBy(GetRank)
+            .ThenByDescending(d => d.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    internal static List<KnownModelGroup> DetectKnownGroups(IReadOnlyList<AzDeployment> deployments)
+    {
+        var groups = new List<KnownModelGroup>();
+        var deploymentNames = deployments.Select(d => d.Name).ToList();
+
+        // Anthropic group: needs fable, opus, sonnet. haiku optional.
+        var anthropicNames = deployments.Where(IsAnthropicDeployment).Select(d => d.Name).ToList();
+        if (anthropicNames.Count == 0)
+        {
+            anthropicNames = deploymentNames.Where(n => n.Contains("claude", StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+
+        var anthropicFable = SuggestRole("fable", anthropicNames);
+        var anthropicOpus = SuggestRole("opus", anthropicNames);
+        var anthropicSonnet = SuggestRole("sonnet", anthropicNames);
+        var anthropicHaiku = SuggestRole("haiku", anthropicNames);
+
+        if (anthropicFable != null && anthropicOpus != null && anthropicSonnet != null)
+        {
+            var label = anthropicHaiku != null
+                ? $"Anthropic ({anthropicFable}, {anthropicOpus}, {anthropicSonnet}, {anthropicHaiku})"
+                : $"Anthropic ({anthropicFable}, {anthropicOpus}, {anthropicSonnet})";
+
+            groups.Add(new KnownModelGroup(
+                Name: "Anthropic",
+                DisplayLabel: label,
+                SonnetDeployment: anthropicSonnet,
+                OpusDeployment: anthropicOpus,
+                FableDeployment: anthropicFable,
+                HaikuDeployment: anthropicHaiku,
+                Api: "anthropic",
+                IsRecommended: true
+            ));
+        }
+
+        // OpenAI group: needs astra (fable), sol (opus), terra (sonnet). luna (haiku) optional.
+        var openAiAstra = deploymentNames
+            .Where(n => n.Contains("astra", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(n => n, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        var openAiSol = deploymentNames
+            .Where(n => n.Contains("sol", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(n => n, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        var openAiTerra = deploymentNames
+            .Where(n => n.Contains("terra", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(n => n, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+        var openAiLuna = deploymentNames
+            .Where(n => n.Contains("luna", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(n => n, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+
+        if (openAiAstra != null && openAiSol != null && openAiTerra != null)
+        {
+            var label = openAiLuna != null
+                ? $"OpenAI ({openAiAstra}, {openAiSol}, {openAiTerra}, {openAiLuna})"
+                : $"OpenAI ({openAiAstra}, {openAiSol}, {openAiTerra})";
+
+            groups.Add(new KnownModelGroup(
+                Name: "OpenAI",
+                DisplayLabel: label,
+                SonnetDeployment: openAiTerra,
+                OpusDeployment: openAiSol,
+                FableDeployment: openAiAstra,
+                HaikuDeployment: openAiLuna,
+                Api: "openai",
+                IsRecommended: groups.Count == 0
+            ));
+        }
+
+        return groups;
+    }
+
+    internal static KnownModelGroup? PickModelGroup(IAnsiConsole console, IReadOnlyList<KnownModelGroup> groups)
+    {
+        const string CustomModelsChoice = "Custom models (configure manually)";
+
+        var choices = new List<string>();
+        var groupMap = new Dictionary<string, KnownModelGroup>();
+
+        foreach (var group in groups)
+        {
+            var choiceLabel = group.IsRecommended
+                ? $"{group.DisplayLabel} [green](Recommended)[/]"
+                : group.DisplayLabel;
+            choices.Add(choiceLabel);
+            groupMap[choiceLabel] = group;
+        }
+        choices.Add(CustomModelsChoice);
+
+        var picked = console.Prompt(
+            new SelectionPrompt<string>()
+                .Title("Select a model group or configure custom models:")
+                .AddChoices(choices));
+
+        return groupMap.TryGetValue(picked, out var g) ? g : null;
+    }
+
+    internal static string PickActiveModelFromGroup(IAnsiConsole console, KnownModelGroup group)
+    {
+        var choices = group.GetActiveModelChoices();
+        var choiceLabels = choices.Select(c => c.IsRecommended
+            ? $"{c.Deployment} [green]({c.Role} — Recommended)[/]"
+            : $"{c.Deployment} [grey]({c.Role})[/]").ToList();
+
+        var picked = console.Prompt(
+            new SelectionPrompt<string>()
+                .Title($"Select the active/start model deployment for [bold]{group.Name}[/]:")
+                .AddChoices(choiceLabels));
+
+        var index = choiceLabels.IndexOf(picked);
+        return choices[index].Deployment;
+    }
+
+    internal static Dictionary<string, string>? BuildDefaultModelNameAliases(
+        IReadOnlyList<AzDeployment> deployments,
+        Dictionary<string, string> modelRoles)
+    {
+        var anthropicNames = deployments.Where(IsAnthropicDeployment).Select(d => d.Name).ToList();
+        var nonClaudeDeployments = deployments.Where(d => !IsAnthropicDeployment(d)).ToList();
+        var roleByDeployment = modelRoles.ToDictionary(kv => kv.Value, kv => kv.Key, StringComparer.OrdinalIgnoreCase);
+
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var dep in nonClaudeDeployments)
+        {
+            var fallbackRole = roleByDeployment.TryGetValue(dep.Name, out var r) ? r : null;
+            var alias = SuggestAliasFor(dep.Name, fallbackRole, anthropicNames);
+            if (alias != null)
+            {
+                result[dep.Name] = alias;
+            }
+        }
+        return result.Count > 0 ? result : null;
     }
 
     internal static string? OfferSave(IAnsiConsole console, FoundryConfig config, string suggestedFileName)
@@ -159,7 +398,17 @@ internal static class FoundryConfigWizard
         foreach (var role in roles)
         {
             var suggested = SuggestRole(role, deploymentNames) ?? primaryDeploymentName;
-            var choices = deploymentNames.Concat(new[] { "<skip>" }).ToList();
+            var choices = new List<string>();
+            if (suggested != null && deploymentNames.Contains(suggested))
+            {
+                choices.Add(suggested);
+                choices.AddRange(deploymentNames.Where(n => !string.Equals(n, suggested, StringComparison.OrdinalIgnoreCase)));
+            }
+            else
+            {
+                choices.AddRange(deploymentNames);
+            }
+            choices.Add("<skip>");
 
             var picked = console.Prompt(
                 new SelectionPrompt<string>()
@@ -241,7 +490,17 @@ internal static class FoundryConfigWizard
         {
             var fallbackRole = roleByDeployment.TryGetValue(dep.Name, out var r) ? r : null;
             var suggested = SuggestAliasFor(dep.Name, fallbackRole, anthropicNames);
-            var choices = anthropicNames.Concat(new[] { "<no alias>" }).ToList();
+            var choices = new List<string>();
+            if (suggested != null && anthropicNames.Contains(suggested))
+            {
+                choices.Add(suggested);
+                choices.AddRange(anthropicNames.Where(n => !string.Equals(n, suggested, StringComparison.OrdinalIgnoreCase)));
+            }
+            else
+            {
+                choices.AddRange(anthropicNames);
+            }
+            choices.Add("<no alias>");
 
             var picked = console.Prompt(
                 new SelectionPrompt<string>()
@@ -278,6 +537,14 @@ internal static class FoundryConfigWizard
         ("kimi",     "sonnet"),
     ];
 
+    private static readonly Dictionary<string, string> DefaultClaudeRolesToModels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["fable"] = "claude-fable-5-1",
+        ["opus"] = "claude-opus-5",
+        ["sonnet"] = "claude-sonnet-5",
+        ["haiku"] = "claude-haiku-4-5",
+    };
+
     // Returns the best Anthropic alias for an OpenAI deployment name, trying known
     // equivalence patterns first, then the Claude Code role name, then null.
     // Internal for direct unit testing of equivalence matching.
@@ -290,9 +557,22 @@ internal static class FoundryConfigWizard
             {
                 var match = SuggestRole(claudeRole, anthropicNames);
                 if (match is not null) return match;
+                if (anthropicNames.Count == 0 && DefaultClaudeRolesToModels.TryGetValue(claudeRole, out var def))
+                {
+                    return def;
+                }
             }
         }
-        return fallbackRole is not null ? SuggestRole(fallbackRole, anthropicNames) : null;
+        if (fallbackRole is not null)
+        {
+            var match = SuggestRole(fallbackRole, anthropicNames);
+            if (match is not null) return match;
+            if (anthropicNames.Count == 0 && DefaultClaudeRolesToModels.TryGetValue(fallbackRole, out var def))
+            {
+                return def;
+            }
+        }
+        return null;
     }
 
     // True when a deployment is confirmed Anthropic-format (from the Format field in

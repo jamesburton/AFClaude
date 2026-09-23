@@ -4,7 +4,7 @@
 AFClaude is a local proxy that lets Claude Code (and MCP clients) run against Azure AI Foundry deployments — both native Anthropic (Claude) deployments via a passthrough, and OpenAI-compatible deployments via an Anthropic↔OpenAI bridge.
 
 ## Current State
-**v0.9.3, 169 tests, all green.** Model `[1m]` suffix handling, 1M context auto-compaction window injection, and history `server_tool_use` sanitization completed.
+**v0.9.4 in progress, 179 tests, all green.** Known model group onboarding, recommended-first selection sorting, statusline progress bar fix, model `[1m]` suffix handling, 1M context auto-compaction window injection, and history `server_tool_use` sanitization completed.
 
 ## qhub-sweden Resource Inventory
 Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`  
@@ -95,6 +95,30 @@ dnx AFClaude -y -- launch
   - **Root Cause**: The statusline hook (`C:\Users\james\.claude\hooks\gsd-statusline.js`) had an inverted calculation when `CLAUDE_CODE_AUTO_COMPACT_WINDOW` was set. It calculated `AUTO_COMPACT_BUFFER_PCT = (acw / totalCtx) * 100` (evaluating to 90% for a 900k threshold on 1M context), mistakenly treating the compaction threshold as the buffer rather than `(totalCtx - acw) / totalCtx * 100` (10% buffer). Any usage over 10% (remaining <= 90%) caused `usableRemaining` to clamp to `0%`, pegging the statusline meter to `💀 [██████████] 100%`.
   - **Context Window Property**: In Claude Code v2.1+, the payload property is `data.context_window.context_window_size` rather than `total_tokens`.
   - **Fix Applied**: Updated `gsd-statusline.js` to recognize `context_window_size` and correctly calculate the autocompact buffer percentage as `((totalCtx - acw) / totalCtx) * 100`. The status bar now accurately reflects 1M usage (e.g., 255k tokens renders as ~29% in green instead of 100% skull).
+
+### Phase 14.6 (Streamlined Onboarding & Known Model Groups)
+- **Known Model Group Detection**:
+  - Automatically identifies complete model groups on the selected resource:
+    - **Anthropic Group**: `claude-fable-5-1`, `claude-opus-5`, `claude-sonnet-5` (and optional `claude-haiku-4-5`).
+    - **OpenAI Group**: `gpt-6-astra`, `gpt-5.6-sol`/`gpt-6-sol`, `gpt-5.6-terra` (and optional `gpt-5.6-luna`/`gpt-6-luna`).
+    - **Custom models**: manual individual selection fallback.
+  - The Haiku / Luna tier is optional and omitted from the group label if absent on the resource.
+- **Active / Start Model Swapped First**:
+  - When a group is chosen, it automatically maps the roles and lets the user select the active/start model directly from the mapped group.
+- **Recommended-First Sorting**:
+  - Every selection prompt puts the recommended option at the very top:
+    - Group picker: Anthropic group `(Recommended)` first.
+    - Active model picker: Sonnet / Terra `(Recommended)` first.
+    - Deployment picker: Sonnet / Terra `(Recommended)` first.
+    - Role and alias picker: Suggested deployment / alias `(suggested)` first.
+- **Default Aliases for OpenAI Groups**:
+  - `BuildDefaultModelNameAliases` automatically maps OpenAI deployments to Claude counterparts so Claude Code treats them with appropriate context windows and role mapping without tedious per-model prompts.
+- **Azure SwedenCentral Model Availability Findings (2026-09-23)**:
+  - `gpt-6-sol` (version 2026-09-22) and `gpt-6-luna` (version 2026-09-22) released yesterday on GlobalStandard PAYG. Available to be deployed to `qhub-sweden`.
+  - `gpt-6-astra` (version 2026-09-03) is already deployed.
+  - `gpt-5.6-terra` (version 2026-07-09) is the current terra version (no `gpt-6-terra` on Azure yet).
+  - `claude-opus-5-5` (version 2, GA) is also available on GlobalStandard.
+- Test suite expanded to 179 tests (10 new tests), all passing.
 
 ## Key Design Decisions
 - Equivalence matching uses deployment name patterns (`astra`, `sol`, `terra`, `luna`) and prioritizes the highest matching version (`claude-sonnet-5` beats `4-6`).

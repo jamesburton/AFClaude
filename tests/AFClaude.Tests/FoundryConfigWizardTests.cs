@@ -291,6 +291,205 @@ public class FoundryConfigWizardTests : IDisposable
 
         Assert.Equal(expectedAlias, match);
     }
+    // ── Known Model Groups & Recommended Selection ───────────────────────────────
+
+    [Fact]
+    public void DetectKnownGroups_AnthropicWithHaiku_IncludesAllFourTiers()
+    {
+        var deployments = MakeDeploymentsWithFormat(
+            ("claude-sonnet-5", "Anthropic"),
+            ("claude-opus-5", "Anthropic"),
+            ("claude-fable-5-1", "Anthropic"),
+            ("claude-haiku-4-5", "Anthropic"));
+
+        var groups = FoundryConfigWizard.DetectKnownGroups(deployments);
+
+        Assert.Single(groups);
+        var g = groups[0];
+        Assert.Equal("Anthropic", g.Name);
+        Assert.Equal("claude-sonnet-5", g.SonnetDeployment);
+        Assert.Equal("claude-opus-5", g.OpusDeployment);
+        Assert.Equal("claude-fable-5-1", g.FableDeployment);
+        Assert.Equal("claude-haiku-4-5", g.HaikuDeployment);
+        Assert.Contains("haiku", g.DisplayLabel, StringComparison.OrdinalIgnoreCase);
+        Assert.True(g.IsRecommended);
+    }
+
+    [Fact]
+    public void DetectKnownGroups_AnthropicWithoutHaiku_HaikuTierOmittedFromLabel()
+    {
+        var deployments = MakeDeploymentsWithFormat(
+            ("claude-sonnet-5", "Anthropic"),
+            ("claude-opus-5", "Anthropic"),
+            ("claude-fable-5-1", "Anthropic"));
+
+        var groups = FoundryConfigWizard.DetectKnownGroups(deployments);
+
+        Assert.Single(groups);
+        var g = groups[0];
+        Assert.Null(g.HaikuDeployment);
+        Assert.DoesNotContain("haiku", g.DisplayLabel, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DetectKnownGroups_OpenAIWithLuna_IncludesAllFourTiers()
+    {
+        var deployments = MakeDeploymentsWithFormat(
+            ("gpt-6-astra", "OpenAI"),
+            ("gpt-5.6-sol", "OpenAI"),
+            ("gpt-5.6-terra", "OpenAI"),
+            ("gpt-5.6-luna", "OpenAI"));
+
+        var groups = FoundryConfigWizard.DetectKnownGroups(deployments);
+
+        Assert.Single(groups);
+        var g = groups[0];
+        Assert.Equal("OpenAI", g.Name);
+        Assert.Equal("gpt-5.6-terra", g.SonnetDeployment);
+        Assert.Equal("gpt-5.6-sol", g.OpusDeployment);
+        Assert.Equal("gpt-6-astra", g.FableDeployment);
+        Assert.Equal("gpt-5.6-luna", g.HaikuDeployment);
+        Assert.Contains("luna", g.DisplayLabel, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DetectKnownGroups_OpenAIWithoutLuna_LunaTierOmittedFromLabel()
+    {
+        var deployments = MakeDeploymentsWithFormat(
+            ("gpt-6-astra", "OpenAI"),
+            ("gpt-5.6-sol", "OpenAI"),
+            ("gpt-5.6-terra", "OpenAI"));
+
+        var groups = FoundryConfigWizard.DetectKnownGroups(deployments);
+
+        Assert.Single(groups);
+        var g = groups[0];
+        Assert.Null(g.HaikuDeployment);
+        Assert.DoesNotContain("luna", g.DisplayLabel, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DetectKnownGroups_BothAnthropicAndOpenAI_ReturnsBothWithAnthropicRecommended()
+    {
+        var deployments = MakeDeploymentsWithFormat(
+            ("claude-sonnet-5", "Anthropic"),
+            ("claude-opus-5", "Anthropic"),
+            ("claude-fable-5-1", "Anthropic"),
+            ("gpt-6-astra", "OpenAI"),
+            ("gpt-5.6-sol", "OpenAI"),
+            ("gpt-5.6-terra", "OpenAI"));
+
+        var groups = FoundryConfigWizard.DetectKnownGroups(deployments);
+
+        Assert.Equal(2, groups.Count);
+        Assert.Equal("Anthropic", groups[0].Name);
+        Assert.True(groups[0].IsRecommended);
+        Assert.Equal("OpenAI", groups[1].Name);
+        Assert.False(groups[1].IsRecommended);
+    }
+
+    [Fact]
+    public void PickModelGroup_SelectsFirstChoiceByDefault()
+    {
+        var console = new TestConsole();
+        console.Interactive();
+        console.Input.PushKey(ConsoleKey.Enter); // first choice (Anthropic recommended)
+
+        var groups = new List<KnownModelGroup>
+        {
+            new("Anthropic", "Anthropic (fable, opus, sonnet)", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1", null, "anthropic", true),
+            new("OpenAI", "OpenAI (astra, sol, terra)", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra", null, "openai", false),
+        };
+
+        var picked = FoundryConfigWizard.PickModelGroup(console, groups);
+
+        Assert.NotNull(picked);
+        Assert.Equal("Anthropic", picked.Name);
+    }
+
+    [Fact]
+    public void PickModelGroup_SelectsCustomModels_ReturnsNull()
+    {
+        var console = new TestConsole();
+        console.Interactive();
+        console.Input.PushKey(ConsoleKey.DownArrow); // OpenAI
+        console.Input.PushKey(ConsoleKey.DownArrow); // Custom models
+        console.Input.PushKey(ConsoleKey.Enter);
+
+        var groups = new List<KnownModelGroup>
+        {
+            new("Anthropic", "Anthropic (fable, opus, sonnet)", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1", null, "anthropic", true),
+            new("OpenAI", "OpenAI (astra, sol, terra)", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra", null, "openai", false),
+        };
+
+        var picked = FoundryConfigWizard.PickModelGroup(console, groups);
+
+        Assert.Null(picked);
+    }
+
+    [Fact]
+    public void PickActiveModelFromGroup_RecommendedSonnetIsFirst()
+    {
+        var console = new TestConsole();
+        console.Interactive();
+        console.Input.PushKey(ConsoleKey.Enter); // first choice (Sonnet recommended)
+
+        var group = new KnownModelGroup(
+            "Anthropic", "Anthropic (claude-fable-5-1, claude-opus-5, claude-sonnet-5, claude-haiku-4-5)",
+            "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1", "claude-haiku-4-5", "anthropic", true);
+
+        var picked = FoundryConfigWizard.PickActiveModelFromGroup(console, group);
+
+        Assert.Equal("claude-sonnet-5", picked);
+    }
+
+    [Fact]
+    public void SortDeploymentsRecommendedFirst_PutsSonnetThenTerraFirst()
+    {
+        var deployments = MakeDeployments(
+            "text-embedding-3-small",
+            "claude-opus-4-6",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "gpt-5.6-terra",
+            "gpt-6-astra");
+
+        var sorted = FoundryConfigWizard.SortDeploymentsRecommendedFirst(deployments);
+
+        // Sonnet is rank 0, highest version first
+        Assert.Equal("claude-sonnet-5", sorted[0].Name);
+        Assert.Equal("claude-sonnet-4-6", sorted[1].Name);
+        // Terra is rank 1
+        Assert.Equal("gpt-5.6-terra", sorted[2].Name);
+        // Embedding is last
+        Assert.Equal("text-embedding-3-small", sorted[^1].Name);
+    }
+
+    [Fact]
+    public void BuildDefaultModelNameAliases_MapsOpenAIToClaude()
+    {
+        var deployments = MakeDeploymentsWithFormat(
+            ("gpt-6-astra", "OpenAI"),
+            ("gpt-5.6-sol", "OpenAI"),
+            ("gpt-5.6-terra", "OpenAI"),
+            ("claude-sonnet-5", "Anthropic"),
+            ("claude-opus-5", "Anthropic"),
+            ("claude-fable-5-1", "Anthropic"));
+
+        var roles = new Dictionary<string, string>
+        {
+            ["Sonnet"] = "gpt-5.6-terra",
+            ["Opus"] = "gpt-5.6-sol",
+            ["Fable"] = "gpt-6-astra",
+        };
+
+        var aliases = FoundryConfigWizard.BuildDefaultModelNameAliases(deployments, roles);
+
+        Assert.NotNull(aliases);
+        Assert.Equal("claude-fable-5-1", aliases["gpt-6-astra"]);
+        Assert.Equal("claude-opus-5", aliases["gpt-5.6-sol"]);
+        Assert.Equal("claude-sonnet-5", aliases["gpt-5.6-terra"]);
+    }
 }
 
 // ── ModelAliasConfig ──────────────────────────────────────────────────────────────

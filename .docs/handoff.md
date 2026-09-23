@@ -4,7 +4,7 @@
 AFClaude is a local proxy that lets Claude Code (and MCP clients) run against Azure AI Foundry deployments — both native Anthropic (Claude) deployments via a passthrough, and OpenAI-compatible deployments via an Anthropic↔OpenAI bridge.
 
 ## Current State
-**v0.9.2, 160 tests, all green.** History `server_tool_use` sanitization (Phase 14.4) and automatic 1M context auto-compaction window injection completed.
+**v0.9.3, 169 tests, all green.** Model `[1m]` suffix handling, 1M context auto-compaction window injection, and history `server_tool_use` sanitization completed.
 
 ## qhub-sweden Resource Inventory
 Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`  
@@ -12,10 +12,10 @@ Endpoint: `https://qhub-sweden.cognitiveservices.azure.com/`
 
 | Deployment | Model | Version | Context Window | Best-Matched Equivalent Alias |
 |-----------|-------|---------|----------------|-------------------------------|
-| `claude-sonnet-5` | claude-sonnet-5 | v2 | 1M ✅ | — (native passthrough) |
-| `claude-opus-5` | claude-opus-5 | v2 | 1M ✅ | — (native passthrough) |
+| `claude-sonnet-5` | claude-sonnet-5 | v2 | 1M ✅ | — (native passthrough with [1m] designation) |
+| `claude-opus-5` | claude-opus-5 | v2 | 1M ✅ | — (native passthrough with [1m] designation) |
 | `claude-haiku-4-5` | claude-haiku-4-5 | v2 | 200K | — (native passthrough) |
-| `claude-fable-5-1` | claude-fable-5-1 | v1 (Preview) | 1M+ tier | — (native passthrough) |
+| `claude-fable-5-1` | claude-fable-5-1 | v1 (Preview) | 1M+ tier | — (native passthrough with [1m] designation) |
 | `gpt-6-astra` | gpt-6-astra | 2026-09-03 | frontier tier | `claude-fable-5-1` |
 | `gpt-5.6-sol` | gpt-5.6-sol | 2026-07-09 | deep reasoning tier | `claude-opus-5` |
 | `gpt-5.6-terra` | gpt-5.6-terra | 2026-07-09 | balanced tier | `claude-sonnet-5` |
@@ -35,7 +35,7 @@ dnx AFClaude -y -- launch --select
 dnx AFClaude -y -- launch
 ```
 
-## Saved Config Format (v0.9.2)
+## Saved Config Format (v0.9.3)
 ```json
 {
   "Endpoint": "https://qhub-sweden.cognitiveservices.azure.com/",
@@ -58,14 +58,14 @@ dnx AFClaude -y -- launch
 }
 ```
 
-**`ModelRoles`** — injects `ANTHROPIC_DEFAULT_*_MODEL` env vars into claude's process at launch. Enables `/model` switching and background model selection.
+**`ModelRoles`** — injects `ANTHROPIC_DEFAULT_*_MODEL` env vars into claude's process at launch (with `[1m]` suffix appended for 1M models). Enables in-session `/model` switching and background model selection.
 
 **`ModelNameAliases`** — rewrites the `model` field in bridge-path (OpenAI) responses so Claude Code recognizes them as defined capability tiers with 1M-context compaction behavior:
-- `astra` → `claude-fable-5-1` (frontier/agent flagship)
-- `sol` → `claude-opus-5` (heavy reasoning tier)
-- `terra` → `claude-sonnet-5` (balanced 1M tier)
+- `astra` → `claude-fable-5-1[1m]` (frontier/agent flagship)
+- `sol` → `claude-opus-5[1m]` (heavy reasoning tier)
+- `terra` → `claude-sonnet-5[1m]` (balanced 1M tier)
 - `luna` → `claude-haiku-4-5` (fast tier; 200K window)
-- `grok` → `claude-opus-5`, `deepseek`/`kimi` → `claude-sonnet-5`
+- `grok` → `claude-opus-5[1m]`, `deepseek`/`kimi` → `claude-sonnet-5[1m]`
 
 **`AutoCompactWindow`** — configures token threshold for compaction. When 1M models are in use, AFClaude defaults `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to `900000` automatically so Claude Code does not default to 200k.
 
@@ -81,10 +81,14 @@ dnx AFClaude -y -- launch
 - Extended wizard to suggest aliases for all non-Claude deployments on the resource.
 - Introduced `SuggestAliasFor` with dedicated capability equivalence table.
 
-### Phase 14.4 (v0.9.2)
+### Phase 14.4 (v0.9.2 - v0.9.3)
 - **Resolved History `server_tool_use` Validation Error during `/compact`**: `FoundryAnthropic.SanitizeHistoryServerToolUse` converts unknown server tools (e.g. `advisor_20260301`) and their corresponding tool result blocks in messages history into standard `text` blocks, bypassing Foundry's strict server-tool enum validator while preserving conversational context.
-- **Resolved Short Context / 200k Default on 1M Models**: `LaunchEnvironment.ApplyAutoCompactWindow` automatically sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW=900000` when 1M models (`sonnet-5`, `opus-5`, `fable`, or aliased targets) are in use unless already set in caller environment.
-- Test suite expanded to 160 tests, all green.
+- **Resolved Short Context / 200k Default on 1M Models**:
+  - Claude Code requires the `[1m]` suffix on model identifiers (e.g. `claude-sonnet-5[1m]`) when connected to custom endpoints, otherwise it reports `capped to 200k by model`.
+  - `LaunchEnvironment.With1mSuffixIfSupported` appends `[1m]` to `ANTHROPIC_MODEL`, `ModelRoles`, and bridge aliases for all 1M models (`sonnet-5`, `opus-5`, `fable-5-1`).
+  - `ForwardAnthropicAsync` injects `[1m]` into the `message_start` response event and non-streaming responses.
+  - `FoundryClientFactory` and `PrepareBody` transparently strip `[1m]` so Foundry receives clean Azure deployment names.
+- Test suite expanded to 169 tests, all green.
 
 ## Key Design Decisions
 - Equivalence matching uses deployment name patterns (`astra`, `sol`, `terra`, `luna`) and prioritizes the highest matching version (`claude-sonnet-5` beats `4-6`).

@@ -298,10 +298,15 @@ public class FoundryConfigWizardTests : IDisposable
 public class ModelAliasConfigTests
 {
     [Fact]
-    public void Resolve_KnownAlias_ReturnsAlias()
+    public void Resolve_KnownAlias_ReturnsAliasWith1mSuffixIfSupported()
     {
-        var config = ModelAliasConfig.From(new Dictionary<string, string> { ["gpt-6-astra"] = "claude-sonnet-5" });
-        Assert.Equal("claude-sonnet-5", config.Resolve("gpt-6-astra"));
+        var config = ModelAliasConfig.From(new Dictionary<string, string>
+        {
+            ["gpt-6-astra"] = "claude-sonnet-5",
+            ["gpt-5.6-luna"] = "claude-haiku-4-5",
+        });
+        Assert.Equal("claude-sonnet-5[1m]", config.Resolve("gpt-6-astra"));
+        Assert.Equal("claude-haiku-4-5", config.Resolve("gpt-5.6-luna"));
     }
 
     [Fact]
@@ -335,10 +340,7 @@ public class ModelAliasConfigTests
     public void Resolve_CaseInsensitive()
     {
         var config = ModelAliasConfig.From(new Dictionary<string, string> { ["GPT-6-Astra"] = "claude-sonnet-5" });
-        // Alias lookup should be case-insensitive if configured that way — depends on dict comparer.
-        // Default StringComparer.OrdinalIgnoreCase used by ModelAliasConfig.From with DI config.
-        // Here the key casing must match since FoundryConfig uses Dictionary<string,string> from JSON.
-        Assert.Equal("claude-sonnet-5", config.Resolve("GPT-6-Astra"));
+        Assert.Equal("claude-sonnet-5[1m]", config.Resolve("GPT-6-Astra"));
     }
 }
 
@@ -405,5 +407,26 @@ public class AutoCompactWindowTests
         var psi = new System.Diagnostics.ProcessStartInfo();
         LaunchEnvironment.ApplyAutoCompactWindow(psi, null, "claude-haiku-4-5");
         Assert.False(psi.Environment.ContainsKey("CLAUDE_CODE_AUTO_COMPACT_WINDOW"));
+    }
+
+    [Theory]
+    [InlineData("claude-sonnet-5", "claude-sonnet-5[1m]")]
+    [InlineData("claude-opus-5", "claude-opus-5[1m]")]
+    [InlineData("claude-fable-5-1", "claude-fable-5-1[1m]")]
+    [InlineData("claude-sonnet-5[1m]", "claude-sonnet-5[1m]")]
+    [InlineData("claude-haiku-4-5", "claude-haiku-4-5")]
+    [InlineData("gpt-4o", "gpt-4o")]
+    public void With1mSuffixIfSupported_AppendsOnlyFor1MModels(string input, string expected)
+    {
+        Assert.Equal(expected, LaunchEnvironment.With1mSuffixIfSupported(input));
+    }
+
+    [Theory]
+    [InlineData("claude-sonnet-5[1m]", "claude-sonnet-5")]
+    [InlineData("claude-sonnet-5", "claude-sonnet-5")]
+    [InlineData("gpt-6-astra[1M]", "gpt-6-astra")]
+    public void Strip1mSuffix_StripsCorrectly(string input, string expected)
+    {
+        Assert.Equal(expected, LaunchEnvironment.Strip1mSuffix(input));
     }
 }

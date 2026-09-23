@@ -153,7 +153,7 @@ static async Task RunLaunchAsync(string[] claudeArgs)
     }
     psi.Environment["ANTHROPIC_BASE_URL"] = baseUrl;
     psi.Environment["ANTHROPIC_API_KEY"] = "afclaude-local";
-    psi.Environment["ANTHROPIC_MODEL"] = deployment;
+    psi.Environment["ANTHROPIC_MODEL"] = LaunchEnvironment.With1mSuffixIfSupported(deployment);
 
     // Inject ANTHROPIC_DEFAULT_*_MODEL from ModelRoles; caller env vars always win.
     ApplyModelRoles(psi, savedConfig?.ModelRoles);
@@ -738,14 +738,34 @@ static async Task ForwardAnthropicAsync(
         var contentType = upstream.Content.Headers.ContentType?.ToString() ?? "application/json";
         http.Response.ContentType = contentType;
 
+        var deployment = anthropic.Deployment;
+        var shouldAppend1M = LaunchEnvironment.IsLongContextModel(deployment);
+
         if (contentType.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase))
         {
             using var tee = trace.Enabled ? new MemoryStream() : null;
             await using var source = await upstream.Content.ReadAsStreamAsync(cancellationToken);
             var buffer = new byte[8192];
             int read;
+            var isFirstChunk = true;
             while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
             {
+                if (isFirstChunk && shouldAppend1M)
+                {
+                    isFirstChunk = false;
+                    var chunkStr = System.Text.Encoding.UTF8.GetString(buffer, 0, read);
+                    var target = $"\"model\":\"{deployment}\"";
+                    var replacement = $"\"model\":\"{deployment}[1m]\"";
+                    if (chunkStr.Contains(target))
+                    {
+                        var replacedStr = chunkStr.Replace(target, replacement);
+                        var replacedBytes = System.Text.Encoding.UTF8.GetBytes(replacedStr);
+                        await http.Response.Body.WriteAsync(replacedBytes.AsMemory(), cancellationToken);
+                        await http.Response.Body.FlushAsync(cancellationToken);
+                        tee?.Write(replacedBytes, 0, replacedBytes.Length);
+                        continue;
+                    }
+                }
                 await http.Response.Body.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
                 await http.Response.Body.FlushAsync(cancellationToken);
                 tee?.Write(buffer, 0, read);
@@ -758,6 +778,10 @@ static async Task ForwardAnthropicAsync(
         else
         {
             var text = await upstream.Content.ReadAsStringAsync(cancellationToken);
+            if (shouldAppend1M)
+            {
+                text = text.Replace($"\"model\":\"{deployment}\"", $"\"model\":\"{deployment}[1m]\"");
+            }
             trace.Write(seq, "anthropic-response.json", text);
             await http.Response.WriteAsync(text, cancellationToken);
         }
@@ -790,7 +814,7 @@ static void ApplyModelRoles(ProcessStartInfo psi, Dictionary<string, string>? ro
         // Caller's env vars always win — only inject if not already set.
         if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(envVar)))
         {
-            psi.Environment[envVar] = deployment;
+            psi.Environment[envVar] = LaunchEnvironment.With1mSuffixIfSupported(deployment);
         }
     }
 }
@@ -837,6 +861,21 @@ internal static class LaunchEnvironment
             || lower.Contains("opus-4-7")
             || lower.Contains("fable");
     }
+
+    public static string With1mSuffixIfSupported(string modelName)
+    {
+        if (string.IsNullOrWhiteSpace(modelName)) return modelName;
+        if (modelName.EndsWith("[1m]", StringComparison.OrdinalIgnoreCase)) return modelName;
+        return IsLongContextModel(modelName) ? $"{modelName}[1m]" : modelName;
+    }
+
+    public static string Strip1mSuffix(string modelName)
+    {
+        if (string.IsNullOrWhiteSpace(modelName)) return modelName;
+        return modelName.EndsWith("[1m]", StringComparison.OrdinalIgnoreCase)
+            ? modelName[..^4]
+            : modelName;
+    }
 }
 
 // Resolves model name aliases for the bridge path: rewrites the model name in responses
@@ -850,8 +889,13 @@ internal sealed class ModelAliasConfig(IReadOnlyDictionary<string, string> alias
         aliases is { Count: > 0 } ? new(aliases) : Empty;
 
     // Returns the alias if configured for this model name, otherwise the name unchanged.
-    public string Resolve(string modelName) =>
-        aliases.TryGetValue(modelName, out var alias) ? alias : modelName;
+    // If the target alias is a 1M model, appends [1m] so Claude Code enables 1M context.
+    public string Resolve(string modelName)
+    {
+        var cleanName = LaunchEnvironment.Strip1mSuffix(modelName);
+        var resolved = aliases.TryGetValue(cleanName, out var alias) ? alias : modelName;
+        return LaunchEnvironment.With1mSuffixIfSupported(resolved);
+    }
 }
 
 internal sealed record DeploymentInfo(string Deployment);

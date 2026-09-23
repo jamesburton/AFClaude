@@ -25,7 +25,7 @@ internal static class FoundryClientFactory
     public static FoundryClient Create(IConfiguration configuration)
     {
         var endpointValue = configuration["Foundry:Endpoint"];
-        var deployment = configuration["Foundry:Deployment"];
+        var rawDeployment = configuration["Foundry:Deployment"];
 
         if (string.IsNullOrWhiteSpace(endpointValue) || !Uri.TryCreate(endpointValue, UriKind.Absolute, out var endpoint))
         {
@@ -34,12 +34,14 @@ internal static class FoundryClientFactory
                 "to the Azure OpenAI/Foundry resource endpoint, e.g. https://<resource>.openai.azure.com/");
         }
 
-        if (string.IsNullOrWhiteSpace(deployment))
+        if (string.IsNullOrWhiteSpace(rawDeployment))
         {
             throw new InvalidOperationException(
                 "Missing configuration 'Foundry:Deployment'. Set the Foundry__Deployment environment variable " +
                 "to the target deployment name.");
         }
+
+        var deployment = LaunchEnvironment.Strip1mSuffix(rawDeployment.Trim());
 
         // Foundry serves different model families on different API surfaces: GPT-family
         // deployments on the Azure-OpenAI chat-completions route, Claude deployments on

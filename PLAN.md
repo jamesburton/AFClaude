@@ -872,7 +872,31 @@ env vars now injected.
 
 8 new tests (125 total); tagged v0.8.0 and published to NuGet.
 
-### 14.3 — History `server_tool_use`/result block stripping — NOT STARTED
+### 14.3 — ModelNameAliases — bridge response model name rewriting for 1M context — DONE
+
+**Problem:** Claude Code determines compaction thresholds from the `model` field in
+bridge-path responses. Unknown model names (e.g. `gpt-6-astra`) fall back to a
+conservative default window; native Anthropic passthrough already carries the correct
+Claude name so it was unaffected. No way to set the context window another way short
+of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
+
+**Solution:** `ModelNameAliases` in `FoundryConfig` maps deployment name → response
+model name. AFClaude rewrites the model field in bridge responses before sending to
+Claude Code. Aliasing `gpt-6-astra → claude-sonnet-5` tells Claude Code to apply the
+1M-context compaction limit. Native passthrough is byte-faithful and unaffected.
+
+Key implementation details:
+- `AzCli.AzDeploymentModel` gained optional `Format` field (from `az` JSON) so the
+  wizard can accurately detect Anthropic vs OpenAI deployments without name guessing.
+- `ModelAliasConfig` sealed class (DI-injectable singleton): `Resolve`, `From`, `Empty`.
+- Registered in `BuildHttpApp(modelNameAliases:)`; injected into `/v1/messages` handler.
+- Alias applied to `model` variable after early Anthropic-path return — only bridge path.
+- `RunLaunchAsync` refactored to load saved config once (fixes dead ModelRoles-in-overrides check).
+- Wizard: `OfferConfigureModelNameAliases` — after role step, auto-detects non-Claude roles, offers alias picker targeting Anthropic deployments. `IsAnthropicDeployment` helper.
+- 10 new tests (135 total); tagged v0.9.0 and published to NuGet.
+- README: saved config JSON example updated with `ModelNameAliases`, per-field descriptions.
+
+### 14.4 — History `server_tool_use`/result block stripping — NOT STARTED
 
 When a `server_tool_use` tool is stripped from the `tools` list (e.g. `advisor_20260301`
 per Phase 13.6/13.7), a resumed conversation whose `messages` history contains prior
